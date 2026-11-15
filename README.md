@@ -54,8 +54,7 @@ scales to fit the window.
 ## Training
 
 The neural bot is trained by search-free self-play REINFORCE, all in Rust
-(`training/`), on a GPU box; see [training/README.md](training/README.md) and
-the plan in [training/PLAN.md](training/PLAN.md).
+(`training/`), on a GPU box; see [training/README.md](training/README.md).
 
 ## Project layout
 

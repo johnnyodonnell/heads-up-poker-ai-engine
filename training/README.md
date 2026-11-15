@@ -5,7 +5,7 @@ fox-lite-ai-engine's recipe, with all training logic in Rust. Self-play,
 training, evaluation, probes and ONNX export all run in one binary, `hu`,
 using `tch`/libtorch on the GPU. The browser (`src/engine/neural.ts`) runs the
 exported ONNX with onnxruntime-web: one forward pass per decision, sampling
-from the policy. The agreed plan is in [PLAN.md](PLAN.md).
+from the policy.
 
 ## Layout
 
