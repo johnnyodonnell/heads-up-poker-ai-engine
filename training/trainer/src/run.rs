@@ -12,6 +12,7 @@
 //!       [--lr 3e-4] [--warmup 100] [--weight-decay 1e-4] [--c-value 1.0]
 //!       [--c-type-ent 0.01] [--c-size-ent 0.001] [--grad-clip 1.0]
 //!       [--snapshot-every 4h] [--seed 42] [--max-cohorts 0]
+//!       [--eval-deals 30000] [--n-top 2] [--n-anchors 3] [--no-eval]
 //!
 //! Resumes from <run-dir>/latest.* if present. Snapshots are taken every
 //! --snapshot-every of training time; the next scheduled snapshot is kept in
@@ -168,6 +169,9 @@ pub fn train(args: &[String]) {
         if let Some(path) = snapshot {
             println!("[snapshot] {}", path.display());
             let name = path.file_stem().unwrap().to_string_lossy().into_owned();
+            println!("[probe] {name} {}", crate::probe::run(&net, dev));
+            let must: Vec<String> = meta.last_snapshot.iter().cloned().collect();
+            crate::eval::after_snapshot(&run_dir, &path, &must, args);
             meta.last_snapshot = Some(name);
             std::fs::write(p("latest.tmp.json"), serde_json::to_string(&meta).unwrap()).unwrap();
             std::fs::rename(p("latest.tmp.json"), p("latest.json")).expect("rename meta");

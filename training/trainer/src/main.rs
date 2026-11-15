@@ -7,13 +7,18 @@
 //!                                   write the browser ONNX (+ a parity fixture:
 //!                                   real encoded positions and tch's outputs)
 //!   train --run-dir DIR [...]       the self-play REINFORCE daemon (see run.rs)
+//!   eval / match / best             bb/100 evaluation and the pool ladder (eval.rs)
+//!   probe --weights w.safetensors   poker-sense probes of a policy (probe.rs)
 //!   selfplay [--weights w.safetensors] [--hands 32768] [--slots 4096] [--seed 1]
 //!                                   one self-play cohort on its own (profiling
 //!                                   + sanity stats)
 
+mod bots;
+mod eval;
 mod hud;
 mod net;
 mod onnx;
+mod probe;
 mod run;
 mod selfplay;
 mod train;
@@ -105,13 +110,7 @@ fn export(args: &[String]) {
     }
 }
 
-fn device() -> Device {
-    if tch::Cuda::is_available() {
-        Device::Cuda(0)
-    } else {
-        Device::Cpu
-    }
-}
+use eval::device;
 
 fn selfplay_cmd(args: &[String]) {
     let dev = device();
@@ -151,8 +150,19 @@ fn main() {
         Some("export") => export(&args),
         Some("selfplay") => selfplay_cmd(&args),
         Some("train") => run::train(&args),
+        Some("eval") => eval::eval_cmd(&args),
+        Some("match") => eval::match_cmd(&args),
+        Some("best") => eval::best_cmd(&args),
+        Some("probe") => {
+            let w = flag(&args, "--weights").expect("--weights w.safetensors");
+            let dev = device();
+            let mut vs = nn::VarStore::new(dev);
+            let hnet = net::HuNet::new(&vs.root());
+            vs.load(&w).unwrap_or_else(|e| panic!("load {w}: {e}"));
+            println!("{}", serde_json::to_string_pretty(&probe::run(&hnet, dev)).unwrap());
+        }
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: gpu-check | export | selfplay | train");
+            eprintln!("unknown subcommand {other:?}; expected: gpu-check | export | selfplay | train | eval | match | best | probe");
             std::process::exit(2);
         }
     }
