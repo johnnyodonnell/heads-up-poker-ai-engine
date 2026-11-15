@@ -6,9 +6,14 @@
 //!          [--fixture fx.json] [--n 256]
 //!                                   write the browser ONNX (+ a parity fixture:
 //!                                   real encoded positions and tch's outputs)
+//!   selfplay [--weights w.safetensors] [--hands 32768] [--slots 4096] [--seed 1]
+//!                                   one self-play cohort on its own (profiling
+//!                                   + sanity stats)
 
+mod hud;
 mod net;
 mod onnx;
+mod selfplay;
 mod util;
 
 use tch::nn::{self, Module, OptimizerConfig};
@@ -97,13 +102,53 @@ fn export(args: &[String]) {
     }
 }
 
+fn device() -> Device {
+    if tch::Cuda::is_available() {
+        Device::Cuda(0)
+    } else {
+        Device::Cpu
+    }
+}
+
+fn selfplay_cmd(args: &[String]) {
+    let dev = device();
+    let mut vs = nn::VarStore::new(dev);
+    let hnet = net::HuNet::new(&vs.root());
+    if let Some(w) = flag(args, "--weights") {
+        vs.load(&w).unwrap_or_else(|e| panic!("load {w}: {e}"));
+    }
+    let hands: usize = util::num(args, "--hands", 32_768);
+    let slots: usize = util::num(args, "--slots", 4096);
+    let seed: u64 = util::num(args, "--seed", 1);
+    let t0 = std::time::Instant::now();
+    let c = selfplay::run_cohort(&hnet, dev, slots, hands, seed);
+    let secs = t0.elapsed().as_secs_f64();
+    let n = c.rows.len();
+    let zs: Vec<f32> = c.rows.iter().map(|r| r.z).collect();
+    let zmin = zs.iter().cloned().fold(f32::INFINITY, f32::min);
+    let zmax = zs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let zabs = zs.iter().map(|z| z.abs() as f64).sum::<f64>() / n.max(1) as f64;
+    assert!(zmin >= -1.0 && zmax <= 1.0, "z out of [-1, 1]: [{zmin}, {zmax}]");
+    let sized = c.rows.iter().filter(|r| r.sized).count();
+    println!(
+        "{}",
+        serde_json::json!({
+            "hands": c.hands, "rows": n, "rows_per_hand": (n as f64 / c.hands as f64 * 100.0).round() / 100.0,
+            "sized_rows": sized, "forwards": c.forwards, "secs": (secs * 100.0).round() / 100.0,
+            "hands_per_sec": (c.hands as f64 / secs).round(), "z_min": zmin, "z_max": zmax,
+            "z_mean_abs": (zabs * 1000.0).round() / 1000.0, "hud": c.hud.to_json(),
+        })
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("gpu-check") => std::process::exit(if gpu_check() { 0 } else { 1 }),
         Some("export") => export(&args),
+        Some("selfplay") => selfplay_cmd(&args),
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: gpu-check | export");
+            eprintln!("unknown subcommand {other:?}; expected: gpu-check | export | selfplay");
             std::process::exit(2);
         }
     }
