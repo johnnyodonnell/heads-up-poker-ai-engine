@@ -7,6 +7,9 @@
 //       every action (with the legal-action set it was chosen from), every
 //       advanceStreet, the state after each step, and each hand's results +
 //       action history.
+//       Every decision also carries the encoder's output (sparse [index,
+//       value] pairs), the action space, and raiseToFor at fixed band
+//       positions, for encoder / action-space parity.
 //   training/fixtures/eval_hands.json     random 7-card hands with their
 //       evaluate7 score arrays (for ordering parity).
 //
@@ -30,6 +33,8 @@ import {
 } from "../../src/engine/game.ts";
 import type { EngineState } from "../../src/engine/game.ts";
 import { bestMove } from "../../src/engine/random.ts";
+import { encode } from "../../src/engine/encode.ts";
+import { raiseToFor } from "../../src/engine/actions.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = resolve(here, "../fixtures");
@@ -88,6 +93,30 @@ function startStacks(): [number, number] {
   return Math.random() < 0.5 ? [a, TOTAL - a] : [TOTAL - a, a];
 }
 
+const BAND_US = [0, 0.1, 0.25, 0.5, 0.75, 0.9, 1];
+
+// Encoder + action-space snapshot for the player to act.
+function encoding(s: EngineState) {
+  const e = encode(s)!;
+  const enc: [number, number][] = [];
+  e.x.forEach((v, i) => {
+    if (v !== 0) enc.push([i, v]);
+  });
+  const sp = e.space;
+  return {
+    enc,
+    space: {
+      mask: sp.mask,
+      potAfterCall: sp.potAfterCall,
+      minRaiseTo: sp.minRaiseTo,
+      maxRaiseTo: sp.maxRaiseTo,
+      sLo: sp.sLo,
+      sHi: sp.sHi,
+      raiseTo: sp.mask[2] ? BAND_US.map((u) => raiseToFor(sp, u)) : [],
+    },
+  };
+}
+
 function recordMatch() {
   const events: unknown[] = [];
   const stacks = startStacks();
@@ -112,9 +141,10 @@ function recordMatch() {
       events.push({ kind: "advance", after: summary(s) });
     } else {
       const legal = legalActions(s)!;
+      const enc = encoding(s);
       const action = bestMove(s);
       s = applyAction(s, action);
-      events.push({ kind: "act", action, legal, after: summary(s) });
+      events.push({ kind: "act", action, legal, enc, after: summary(s) });
     }
     if (s.phase === "hand-over" || s.phase === "match-over") {
       events.push({ kind: "end", results: results(s) });
