@@ -6,7 +6,10 @@ bottom seat; the bot sits across from you.
 
 For now the bot is a **random engine** (`engine/random.ts`): it picks a
 uniform-random legal action and, for a bet or raise, a uniform-random legal
-size. It is a placeholder until a trained model replaces it.
+size. It is a placeholder until a trained model replaces it: a neural engine
+(`engine/neural.ts`) trained by self-play is in progress — see
+[training/README.md](training/README.md) — and takes over once a trained
+snapshot is pulled into `public/models/current.onnx`.
 
 The engine module exposes a single `bestMove(state)` function, so the engine can
 be swapped without touching the UI. This is the same pattern as the sibling
@@ -44,6 +47,15 @@ scales to fit the window.
   **New Game** to start over.
 - **Short all-ins**: an all-in raise smaller than a full raise doesn't reopen
   the betting to a player who already acted (they may only call or fold).
+- **Only real decisions**: you can't raise against a player who is already
+  all-in (only call or fold), and a blind posted all-in that's already covered
+  goes straight to the run-out.
+
+## Training
+
+The neural bot is trained by search-free self-play REINFORCE, all in Rust
+(`training/`), on a GPU box; see [training/README.md](training/README.md) and
+the plan in [training/PLAN.md](training/PLAN.md).
 
 ## Project layout
 
@@ -62,6 +74,11 @@ src/
     evaluator.ts        best-5-of-7 hand ranking + comparison
     game.ts             pure heads-up NLHE rules — no React, no side effects
     random.ts           the AI — bestMove(state): a random legal action
+    neural.ts           the trained AI (not wired in yet) — encode, run the
+                        net, sample a move
+    net.ts              onnxruntime-web session for public/models/current.onnx
+    encode.ts           the network's input encoding (Rust mirror in training/)
+    actions.ts          the action space: four types + a continuous raise size
     adapt.ts            maps engine state <-> the UI's GameState / BetAction
   components/
     layout.ts           stage size and every seat/bet/dealer/pot position
@@ -82,7 +99,7 @@ in a different engine, change that one line:
 
 ```ts
 import { bestMove } from "../engine/random";   // current
-// import { bestMove } from "../engine/<other>";
+// import { bestMove } from "../engine/neural";   // once a model is pulled in
 ```
 
 ```ts
