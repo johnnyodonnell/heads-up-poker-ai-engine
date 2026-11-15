@@ -1,0 +1,145 @@
+/* A seat is a zero-size anchor at the center of its name plate; everything
+   else is positioned around that point. */
+.seat {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.seat-plate {
+  position: absolute;
+  left: -92px;
+  top: -38px;
+  width: 184px;
+  height: 76px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 14px;
+  background: linear-gradient(180deg, #2c313c 0%, #1a1d24 55%, #121419 100%);
+  border: 1px solid #424857;
+  box-shadow:
+    0 6px 16px rgba(0, 0, 0, 0.55),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  transition: opacity 0.2s, box-shadow 0.2s;
+}
+
+.seat-name {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1.1;
+  color: #f2f3f5;
+  padding-bottom: 3px;
+  width: 80%;
+  text-align: center;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.seat-stack {
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: #f7c23d;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+/* Hole cards sit above the plate, tucked behind its top edge. */
+.seat-cards {
+  position: absolute;
+  z-index: 1;
+  left: 0;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 2px;
+  top: -128px;
+}
+
+.seat.is-human .seat-cards {
+  top: -160px;
+  gap: 0;
+}
+
+.seat.is-human .seat-cards .card + .card {
+  margin-left: -6px;
+}
+
+/* Folded hole cards stay hidden until you hover the seat (or the spot where
+   the cards were), then reappear dimmed under the FOLD tab. */
+.seat-cards.folded-peek {
+  opacity: 0;
+  filter: grayscale(0.35) brightness(0.6);
+  transition: opacity 0.15s;
+}
+
+.seat:hover .seat-cards.folded-peek {
+  opacity: 1;
+}
+
+.seat.folded .seat-plate {
+  opacity: 0.55;
+}
+
+.seat.folded .seat-stack {
+  color: #b8963a;
+}
+
+.seat.eliminated .seat-plate {
+  opacity: 0.3;
+}
+
+.seat.is-winner .seat-plate {
+  border-color: #f7c23d;
+  box-shadow:
+    0 0 24px rgba(247, 194, 61, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+}
+
+/* Action / blind tab, sitting on the plate's top-left edge over the cards. */
+.seat-label {
+  position: absolute;
+  z-index: 3;
+  left: -84px;
+  top: -66px;
+  padding: 0 10px;
+  height: 28px;
+  line-height: 28px;
+  border-radius: 6px 6px 0 0;
+  font-size: 19px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: #fff;
+  box-shadow: 0 -2px 6px rgba(0, 0, 0, 0.35);
+}
+
+.seat.is-human .seat-label {
+  left: -84px;
+}
+
+.label-passive {
+  background: linear-gradient(180deg, #19a777, #0f805a);
+}
+
+.label-aggressive {
+  background: linear-gradient(180deg, #e7a321, #b87a0c);
+}
+
+.label-allin {
+  background: linear-gradient(180deg, #e2384d, #a8172c);
+}
+
+.label-muted {
+  background: #2c313a;
+  color: #8c929d;
+}
+
+.label-blind {
+  top: -62px;
+  height: 26px;
+  line-height: 26px;
+  padding: 0 7px;
+  border-radius: 5px;
+  background: linear-gradient(180deg, #2a86f0, #155fc0);
+}

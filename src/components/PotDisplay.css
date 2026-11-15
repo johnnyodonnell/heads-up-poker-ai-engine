@@ -1,0 +1,14 @@
+.pot-label {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 1px 18px;
+  border-radius: 18px;
+  background: rgba(6, 40, 30, 0.7);
+  font-size: 28px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.pot-word {
+  color: #46b4ff;
+}
