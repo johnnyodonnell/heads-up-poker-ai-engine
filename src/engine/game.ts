@@ -244,8 +244,15 @@ export function startHand(prev: EngineState): EngineState {
     }
   }
 
-  // Pre-flop the small blind (the button) acts first.
-  const firstToAct = nextSeat(players, bbSeat, (p) => p.status === "active");
+  // The bet to match is the largest blind actually posted: a big blind who is
+  // all-in for less than a full blind doesn't leave a phantom amount to call.
+  const currentBet = Math.max(...players.map((p) => p.bet));
+
+  // Pre-flop the small blind (the button) acts first — if anyone has a real
+  // decision at all (a blind all-in that's already covered leaves none).
+  const firstToAct = nextSeat(players, bbSeat, (p) =>
+    owesAction(players, currentBet, p),
+  );
 
   const log = [`--- Hand #${prev.handNumber + 1} ---`];
   log.push(`${players[sbSeat].name} posts SB ${SMALL_BLIND}`);
@@ -262,10 +269,11 @@ export function startHand(prev: EngineState): EngineState {
     community: [],
     deck,
     pot: 0,
-    currentBet: BIG_BLIND,
+    currentBet,
     minRaise: BIG_BLIND,
     toAct: firstToAct,
-    // Nobody left to act (blinds posted all-in): straight to the run-out.
+    // Nobody has a decision (a blind all-in already covered): straight to the
+    // run-out.
     phase: firstToAct === -1 ? "street-complete" : "betting",
     results: null,
     log,
@@ -310,9 +318,14 @@ export function legalActions(state: EngineState): LegalActions | null {
     opening ? BIG_BLIND : state.currentBet + state.minRaise,
     maxTo,
   );
-  // A raise/bet is only possible if the player can put more in than a call
-  // and the betting is still open to them.
-  if (maxTo > state.currentBet && hasRaiseRights(state, p)) {
+  // A raise/bet is only possible if the player can put more in than a call,
+  // the betting is still open to them, and the opponent can still respond
+  // (raising an all-in player would only have the excess returned).
+  if (
+    maxTo > state.currentBet &&
+    hasRaiseRights(state, p) &&
+    opponentCanAct(state.players, p)
+  ) {
     actions.push(opening ? "bet" : "raise");
   }
 
@@ -463,28 +476,40 @@ export function applyAction(state: EngineState, action: Action): EngineState {
   return next;
 }
 
-// The betting round closes when no 'active' player still owes an action — i.e.
-// everyone active has acted and matched the current bet. Also closes the
-// instant only one non-folded player remains.
+// Whether some other player could still respond to `p` (is in the hand with
+// chips behind). Heads-up: the opponent is active, not all-in or folded.
+function opponentCanAct(players: EnginePlayer[], p: EnginePlayer): boolean {
+  return players.some((q) => q.id !== p.id && q.status === "active");
+}
+
+// Whether `p` has a real decision to make: they can act, and either owe chips
+// to match the bet, or haven't acted yet while the opponent can still respond.
+// (A player facing nothing, against an all-in opponent, has nothing to decide.)
+function owesAction(
+  players: EnginePlayer[],
+  currentBet: number,
+  p: EnginePlayer,
+): boolean {
+  if (p.status !== "active") return false;
+  return p.bet < currentBet || (!p.hasActed && opponentCanAct(players, p));
+}
+
+// The betting round closes when no player still owes an action. Also closes
+// the instant only one non-folded player remains.
 function bettingClosed(state: EngineState): boolean {
   const inHand = state.players.filter(
     (p) => p.status === "active" || p.status === "allin",
   );
   if (inHand.length <= 1) return true;
-
-  for (const p of state.players) {
-    if (p.status !== "active") continue;
-    if (!p.hasActed || p.bet < state.currentBet) return false;
-  }
-  return true;
+  return !state.players.some((p) =>
+    owesAction(state.players, state.currentBet, p),
+  );
 }
 
 // Next seat after `from` that still owes an action.
 function nextActor(state: EngineState, from: number): number {
-  return nextSeat(
-    state.players,
-    from,
-    (p) => p.status === "active" && (!p.hasActed || p.bet < state.currentBet),
+  return nextSeat(state.players, from, (p) =>
+    owesAction(state.players, state.currentBet, p),
   );
 }
 
