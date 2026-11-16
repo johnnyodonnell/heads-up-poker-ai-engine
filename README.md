@@ -4,12 +4,10 @@ A heads-up (one-on-one) **No-Limit Texas Hold'em** game in the browser
 (React 19 + TypeScript 7 + Vite 8) with a swappable AI engine. You take the
 bottom seat; the bot sits across from you.
 
-For now the bot is a **random engine** (`engine/random.ts`): it picks a
-uniform-random legal action and, for a bet or raise, a uniform-random legal
-size. It is a placeholder until a trained model replaces it: a neural engine
-(`engine/neural.ts`) trained by self-play is in progress — see
-[training/README.md](training/README.md) — and takes over once a trained
-snapshot is pulled into `public/models/current.onnx`.
+The bot is a **neural engine** (`engine/neural.ts`): a policy network trained
+by self-play, shipped as `public/models/current.onnx` and run in the browser
+with onnxruntime-web. It samples a move from the policy and falls back to the
+**random engine** (`engine/random.ts`) if the model fails to load.
 
 The engine module exposes a single `bestMove(state)` function, so the engine can
 be swapped without touching the UI. This is the same pattern as the sibling
@@ -51,11 +49,6 @@ scales to fit the window.
   all-in (only call or fold), and a blind posted all-in that's already covered
   goes straight to the run-out.
 
-## Training
-
-The neural bot is trained by search-free self-play REINFORCE, all in Rust
-(`training/`), on a GPU box; see [training/README.md](training/README.md).
-
 ## Project layout
 
 ```
@@ -72,11 +65,11 @@ src/
     cards.ts            52-card deck, shuffle, card formatting
     evaluator.ts        best-5-of-7 hand ranking + comparison
     game.ts             pure heads-up NLHE rules — no React, no side effects
-    random.ts           the AI — bestMove(state): a random legal action
-    neural.ts           the trained AI (not wired in yet) — encode, run the
-                        net, sample a move
+    neural.ts           the AI — bestMove(state): encode, run the net,
+                        sample a move
+    random.ts           fallback — a random legal action
     net.ts              onnxruntime-web session for public/models/current.onnx
-    encode.ts           the network's input encoding (Rust mirror in training/)
+    encode.ts           the network's input encoding
     actions.ts          the action space: four types + a continuous raise size
     adapt.ts            maps engine state <-> the UI's GameState / BetAction
   components/

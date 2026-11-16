@@ -1,6 +1,5 @@
-// Canonical NN input encoding for the heads-up poker engine. This is the
-// source of truth; the Rust trainer (training/hu_core/src/encode.rs) is
-// parity-tested against it.
+// Canonical NN input encoding for the heads-up poker engine. It must match
+// the encoding the model was trained with.
 //
 // Everything is from the point of view of the player to act ("the mover"):
 // the other seat is "the opponent", and suits are relabeled by order of first

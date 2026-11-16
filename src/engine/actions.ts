@@ -1,5 +1,5 @@
-// The neural engine's action space, shared (by parity tests) with the Rust
-// trainer (training/hu_core/src/actions.rs).
+// The neural engine's action space. It must match the one the model was
+// trained with.
 //
 // The policy picks one of four action types — fold, check/call, bet/raise,
 // all-in — and, for a bet/raise, a continuous size. Sizes live on a log scale
