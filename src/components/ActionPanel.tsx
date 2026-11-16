@@ -17,6 +17,34 @@ interface ActionPanelProps {
   isProcessingBots: boolean;
 }
 
+// Chip denominations, smallest first (one chip unit is one dollar).
+const DENOMINATIONS = [1, 5, 25, 100] as const;
+
+function Chip({
+  value,
+  onClick,
+  disabled = false,
+  label,
+}: {
+  value: number;
+  onClick: () => void;
+  disabled?: boolean;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      className={`bet-chip bet-chip-${value}`}
+      onClick={onClick}
+      disabled={disabled}
+      aria-label={label}
+      title={label}
+    >
+      <span className="bet-chip-face">{value}</span>
+    </button>
+  );
+}
+
 export default function ActionPanel({
   phase,
   humanCanAct,
@@ -30,11 +58,13 @@ export default function ActionPanel({
   onNewGame,
   isProcessingBots,
 }: ActionPanelProps) {
+  // The "raise to" / "bet" total, kept between the minimum raise and all-in.
   const [raiseAmount, setRaiseAmount] = useState(minRaiseAmount);
 
+  // Start every decision at the minimum raise.
   useEffect(() => {
     setRaiseAmount(minRaiseAmount);
-  }, [minRaiseAmount]);
+  }, [phase, humanCanAct, isProcessingBots, minRaiseAmount, maxRaiseAmount]);
 
   if (gameOver) {
     return (
@@ -61,25 +91,49 @@ export default function ActionPanel({
   }
 
   const canRaise = minRaiseAmount > 0 && maxRaiseAmount > 0;
-  const showSlider = canRaise && minRaiseAmount < maxRaiseAmount;
+  // With a choice of sizes, chips step the bet up and down; otherwise the
+  // only raise is all-in.
+  const showChips = canRaise && minRaiseAmount < maxRaiseAmount;
   // Nothing to call after the flop means this is an opening bet, not a raise.
   const raiseVerb = canCheck && phase !== "preflop" ? "Bet" : "Raise to";
   const allIn = raiseAmount >= maxRaiseAmount;
 
+  // A chip that would take the bet past all-in, or below the minimum raise,
+  // can't be used (and is dimmed).
+  const canAdd = (value: number) => raiseAmount + value <= maxRaiseAmount;
+  const canRemove = (value: number) => raiseAmount - value >= minRaiseAmount;
+  const addChip = (value: number) => setRaiseAmount((r) => r + value);
+  const removeChip = (value: number) => setRaiseAmount((r) => r - value);
+
   return (
     <div className="action-panel">
-      {showSlider && (
-        <div className="raise-controls">
-          <input
-            type="range"
-            className="raise-slider"
-            min={minRaiseAmount}
-            max={maxRaiseAmount}
-            value={raiseAmount}
-            onChange={(e) => setRaiseAmount(Number(e.target.value))}
-          />
-          <span className="raise-amount">{dollars(raiseAmount)}</span>
-        </div>
+      {showChips && (
+        <>
+          <div className="chip-row" aria-label="Take chips off the bet">
+            <span className="chip-row-sign">−</span>
+            {DENOMINATIONS.map((value) => (
+              <Chip
+                key={value}
+                value={value}
+                onClick={() => removeChip(value)}
+                disabled={!canRemove(value)}
+                label={`Remove ${dollars(value)}`}
+              />
+            ))}
+          </div>
+          <div className="chip-row" aria-label="Add chips to the bet">
+            <span className="chip-row-sign">+</span>
+            {DENOMINATIONS.map((value) => (
+              <Chip
+                key={value}
+                value={value}
+                onClick={() => addChip(value)}
+                disabled={!canAdd(value)}
+                label={`Add ${dollars(value)}`}
+              />
+            ))}
+          </div>
+        </>
       )}
       <div className="action-buttons">
         {canCheck ? (
@@ -98,7 +152,7 @@ export default function ActionPanel({
         )}
 
         {canRaise &&
-          (showSlider ? (
+          (showChips ? (
             <button
               className="btn btn-raise"
               onClick={() => onAction({ type: "raise", amount: raiseAmount })}
