@@ -10,6 +10,10 @@ fixtures.
 ```
 hu_core/          the game: a port of src/engine/game.ts (rules), cards, a 7-card
                   hand evaluator, equity and all-in EV
+hu_cfr/           the solver: abstract betting trees + bet-size menus, 169 preflop
+                  classes, external-sampling MCCFR, exact best response for
+                  small games, push/fold and Kuhn/Leduc validation games
+hu/               the `hu` command line (built on the box)
 scripts/          TS run with tsx: rule scenario checks, parity fixture dumper
 fixtures/         parity fixtures dumped from the TS engine (gitignored)
 box_env.sh        environment for the box (sourced by box.sh)
@@ -40,3 +44,13 @@ npx tsx cfr/scripts/dump_fixtures.ts      # -> cfr/fixtures/
 cfr/sync_to_box.sh
 cfr/box.sh cargo test --release -p hu_core
 ```
+
+## Solver checks
+
+- `cargo test --release -p hu_cfr`: MCCFR reaches the known equilibria of Kuhn
+  poker (value -1/18) and Leduc hold'em (exact exploitability via best
+  response), single- and multi-threaded; tree and checkpoint tests.
+- `hu pushfold --stack 20`: heads-up push/fold at 10bb, MCCFR on real dealt
+  cards against an exact full-width solve (58.4% shove / 37.3% call; MCCFR
+  lands within 0.5 mbb/hand of exploitability in seconds).
+- `hu tree --stack 200 --buckets 169,2000,2000,1000`: size of a betting tree.

@@ -1,0 +1,17 @@
+[package]
+name = "hu"
+version = "0.1.0"
+edition = "2021"
+description = "The CFR engine's command line: build abstractions, train, export, evaluate, serve"
+
+[[bin]]
+name = "hu"
+path = "src/main.rs"
+
+[dependencies]
+hu_core = { path = "../hu_core" }
+hu_cfr = { path = "../hu_cfr" }
+rand = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
