@@ -8,7 +8,7 @@ import {
 } from "../engine/game";
 import type { EngineState } from "../engine/game";
 // The bot's engine. Swap this one import to plug in a different engine.
-import { bestMove } from "../engine/random";
+import { bestMove } from "../engine/neural";
 import { toGameState, fromBetAction } from "../engine/adapt";
 
 // Run the engine forward until a human decision is required or the hand/match
