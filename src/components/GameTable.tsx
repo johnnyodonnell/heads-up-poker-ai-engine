@@ -8,6 +8,8 @@ import ChipStack from "./ChipStack";
 import DealerButton from "./DealerButton";
 import ActionPanel from "./ActionPanel";
 import HandResult from "./HandResult";
+import DebugPanel from "./DebugPanel";
+import type { BotDecision } from "../engine/remote";
 import { STAGE_WIDTH, STAGE_HEIGHT, BET_POS } from "./layout";
 import "./GameTable.css";
 
@@ -19,6 +21,13 @@ interface GameTableProps {
   onNewGame: () => void;
   isProcessingBots?: boolean;
   faceUp?: boolean;
+  // Debug view: the toggle, and the bot's decisions this hand.
+  debug?: boolean;
+  onToggleDebug?: () => void;
+  decisions?: BotDecision[];
+  // Set when the bot couldn't move (engine unreachable / error).
+  engineError?: string | null;
+  onRetry?: () => void;
 }
 
 // Scale the fixed-size stage to fit the window, preserving its aspect ratio.
@@ -42,6 +51,11 @@ export default function GameTable({
   onNewGame,
   isProcessingBots = false,
   faceUp = false,
+  debug = false,
+  onToggleDebug,
+  decisions = [],
+  engineError = null,
+  onRetry,
 }: GameTableProps) {
   const scale = useStageScale();
   const winnerSeats = new Set(gameState.winners.map((w) => w.seat));
@@ -98,6 +112,17 @@ export default function GameTable({
             />
           )}
         </PokerTable>
+
+        {onToggleDebug && (
+          <DebugPanel enabled={debug} onToggle={onToggleDebug} decisions={decisions} />
+        )}
+
+        {engineError && (
+          <div className="engine-error">
+            <span>The bot can't move: {engineError}</span>
+            {onRetry && <button onClick={onRetry}>Retry</button>}
+          </div>
+        )}
 
         <div className="action-dock">
           <ActionPanel

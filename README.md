@@ -4,10 +4,11 @@ A heads-up (one-on-one) **No-Limit Texas Hold'em** game in the browser
 (React 19 + TypeScript 7 + Vite 8) with a swappable AI engine. You take the
 bottom seat; the bot sits across from you.
 
-The bot is a **neural engine** (`engine/neural.ts`): a policy network trained
-by self-play, shipped as `public/models/current.onnx` and run in the browser
-with onnxruntime-web. It samples a move from the policy and falls back to the
-**random engine** (`engine/random.ts`) if the model fails to load.
+The bot is a **CFR engine**: a precomputed counterfactual-regret-minimization
+strategy for heads-up no-limit, trained and served by the `asus-nvidia` box
+(see [cfr/README.md](cfr/README.md)). The browser asks the engine for each of
+the bot's moves (`engine/remote.ts` → `POST /api/act`); there is no fallback,
+so if the engine can't be reached the table says so and offers a retry.
 
 The engine module exposes a single `bestMove(state)` function, so the engine can
 be swapped without touching the UI. This is the same pattern as the sibling
@@ -20,16 +21,27 @@ front of each bettor, a pot label above the board, and action buttons at the
 bottom right. Click **Deal** to start each hand; the bot's moves and street
 run-outs resolve without artificial delay.
 
-## Running locally
+## Playing
+
+The box serves the built app along with the engine:
+**http://192.168.0.185:8790**. Desktop browsers only — the table is a
+fixed-size stage that scales to fit the window.
+
+The **Debug** toggle (top left) shows the bot's cards face up and, for each of
+its decisions this hand, the strategy it used (stack depth), its hand group,
+the options it was choosing between with their probabilities, and its pick.
+
+## Developing
 
 ```sh
 npm install
 npm run dev        # or: ./run-local.sh
 ```
 
-Then open the printed URL. `npm run build` type-checks and produces a production
-build in `dist/`. Desktop browsers only — the table is a fixed-size stage that
-scales to fit the window.
+The dev server forwards `/api` to the engine on the box
+(`HU_ENGINE=http://host:port` to point elsewhere). `npm run build` type-checks
+and produces a production build in `dist/`; `cfr/deploy_web.sh` builds and
+copies it to the box.
 
 ## Rules / setup
 
@@ -65,12 +77,8 @@ src/
     cards.ts            52-card deck, shuffle, card formatting
     evaluator.ts        best-5-of-7 hand ranking + comparison
     game.ts             pure heads-up NLHE rules — no React, no side effects
-    neural.ts           the AI — bestMove(state): encode, run the net,
-                        sample a move
-    random.ts           fallback — a random legal action
-    net.ts              onnxruntime-web session for public/models/current.onnx
-    encode.ts           the network's input encoding
-    actions.ts          the action space: four types + a continuous raise size
+    remote.ts           the AI — bestMove(state): the CFR engine on the box
+    random.ts           a random legal action (the original placeholder bot)
     adapt.ts            maps engine state <-> the UI's GameState / BetAction
   components/
     layout.ts           stage size and every seat/bet/dealer/pot position
@@ -79,10 +87,11 @@ src/
     PlayerSeat          plate, hole cards, action label
     Card, CommunityCards, PotDisplay, ChipStack, DealerButton,
     HandResult, ActionPanel
+    DebugPanel          the Debug toggle and the bot's decisions this hand
+cfr/                    the engine: Rust, trained and served on the box
 ```
 
-`GameTable` accepts a `faceUp` prop (default `false`) that shows the bot's hole
-cards; nothing sets it yet.
+`GameTable`'s `faceUp` prop shows the bot's hole cards; the Debug toggle sets it.
 
 ## The engine contract
 
@@ -90,8 +99,8 @@ cards; nothing sets it yet.
 in a different engine, change that one line:
 
 ```ts
-import { bestMove } from "../engine/random";   // current
-// import { bestMove } from "../engine/neural";   // once a model is pulled in
+import { bestMove } from "../engine/remote";   // current: the CFR engine
+// import { bestMove } from "../engine/random";   // the random placeholder
 ```
 
 ```ts
@@ -100,7 +109,8 @@ await bestMove(state)   // state: EngineState (see engine/game.ts)
 ```
 
 The hook `await`s each move, so both synchronous engines (like `random.ts`) and
-async ones (e.g. a neural net running in the browser) work.
+async ones (like the remote engine) work; a rejected move stops the table with
+the error and a Retry button.
 
 Engine actions are `{ type: 'fold' | 'check' | 'call' | 'bet' | 'raise' | 'allin' }`,
 where `amount` (for bet/raise) is the *raise-to* total. `legalActions(state)`

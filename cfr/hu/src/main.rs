@@ -6,7 +6,17 @@
 //!   pushfold [--stack 20] [--iters 2e7] [--samples 20000] [--exact-iters 20000]
 //!       solver check on real cards: MCCFR vs an exact solve of heads-up
 //!       push/fold, with the resulting shove/call charts
+//!   abstraction --name NAME --buckets 169,F,T,R [--fit-boards 1500,2000,2000] [--seed 1]
+//!       build the hand-group tables into $HU_HOME/data/NAME/
+//!   train --run NAME --abs ABS --stack 200 --iters 1e9   train one stack depth (resumable)
+//!   export --run NAME --abs ABS --stack 200              export from the latest checkpoint
+//!   eval --run NAME [--vs all|bot,...] [--deals 20000] [--stacks full|sampled]
+//!   probe --run NAME [--stack 200]                       preflop charts
+//!   serve --run NAME [--port 8790] [--web DIR]           the engine over HTTP + the web app
 
+mod play;
+mod serve;
+mod train;
 mod util;
 
 use std::time::Instant;
@@ -15,7 +25,7 @@ use hu_cfr::classes::{class_name, combos, N_CLASSES};
 use hu_cfr::mccfr::{Config, Solver};
 use hu_cfr::menu::Menu;
 use hu_cfr::pushfold;
-use util::{flag, list, num, threads};
+use util::{flag, hu_home, list, log, num, threads};
 
 fn tree_cmd(args: &[String]) {
     let stack: i32 = num(args, "--stack", 200);
@@ -127,13 +137,32 @@ fn pushfold_cmd(args: &[String]) {
     chart("big blind call % (MCCFR)", &mc_c);
 }
 
+fn abstraction_cmd(args: &[String]) {
+    let name = flag(args, "--name").expect("--name NAME");
+    let b = list(args, "--buckets").expect("--buckets 169,F,T,R");
+    let fit = list(args, "--fit-boards").unwrap_or(vec![1500, 2000, 2000]);
+    let seed: u64 = num(args, "--seed", 1);
+    let dir = hu_home().join("data").join(&name);
+    log(format!("building abstraction {name} {b:?} (fit boards {fit:?}) -> {}", dir.display()));
+    let t = Instant::now();
+    let abs = hu_cfr::abs::build(&name, [b[0], b[1], b[2], b[3]], [fit[0] as usize, fit[1] as usize, fit[2] as usize], seed, &log);
+    abs.save(&dir).expect("save abstraction");
+    log(format!("done in {:.1} min", t.elapsed().as_secs_f64() / 60.0));
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("tree") => tree_cmd(&args),
         Some("pushfold") => pushfold_cmd(&args),
+        Some("abstraction") => abstraction_cmd(&args),
+        Some("train") => train::train_cmd(&args),
+        Some("export") => train::export_cmd(&args),
+        Some("eval") => play::eval_cmd(&args),
+        Some("probe") => play::probe_cmd(&args),
+        Some("serve") => serve::serve_cmd(&args),
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold");
+            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | probe | serve");
             std::process::exit(2);
         }
     }

@@ -5,10 +5,6 @@ pub fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
 }
 
-pub fn has_flag(args: &[String], name: &str) -> bool {
-    args.iter().any(|a| a == name)
-}
-
 /// A numeric flag with a default (accepts 1e6-style and 1_000_000 forms).
 pub fn num<T: std::str::FromStr>(args: &[String], name: &str, default: T) -> T {
     match flag(args, name) {
@@ -30,4 +26,18 @@ pub fn list(args: &[String], name: &str) -> Option<Vec<u32>> {
 
 pub fn threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+}
+
+/// The project folder on the box ($HU_HOME, set by cfr/box_env.sh).
+pub fn hu_home() -> std::path::PathBuf {
+    std::env::var("HU_HOME").map(Into::into).unwrap_or_else(|_| ".".into())
+}
+
+/// Timestamped progress line.
+pub fn log(msg: String) {
+    use std::io::Write;
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "[{:02}:{:02}:{:02}] {msg}", (t / 3600) % 24, (t / 60) % 60, t % 60);
+    let _ = out.flush();
 }
