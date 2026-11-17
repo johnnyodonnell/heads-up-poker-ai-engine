@@ -98,12 +98,18 @@ export default function ActionPanel({
   const raiseVerb = canCheck && phase !== "preflop" ? "Bet" : "Raise to";
   const allIn = raiseAmount >= maxRaiseAmount;
 
-  // A chip that would take the bet past all-in, or below the minimum raise,
-  // can't be used (and is dimmed).
-  const canAdd = (value: number) => raiseAmount + value <= maxRaiseAmount;
-  const canRemove = (value: number) => raiseAmount - value >= minRaiseAmount;
-  const addChip = (value: number) => setRaiseAmount((r) => r + value);
-  const removeChip = (value: number) => setRaiseAmount((r) => r - value);
+  // Room left to move the bet up (to all-in) and down (to the minimum raise).
+  const roomUp = maxRaiseAmount - raiseAmount;
+  const roomDown = raiseAmount - minRaiseAmount;
+  // A chip works if it fits in the room, and so does the smallest chip that
+  // reaches or passes the end, which stops the bet there: adding goes all-in,
+  // removing goes back to the minimum raise. Larger chips are dimmed.
+  const usable = (index: number, room: number) =>
+    room > 0 && (index === 0 || DENOMINATIONS[index - 1] < room);
+  const addChip = (value: number) =>
+    setRaiseAmount((r) => Math.min(r + value, maxRaiseAmount));
+  const removeChip = (value: number) =>
+    setRaiseAmount((r) => Math.max(r - value, minRaiseAmount));
 
   return (
     <div className="action-panel">
@@ -111,25 +117,25 @@ export default function ActionPanel({
         <>
           <div className="chip-row" aria-label="Take chips off the bet">
             <span className="chip-row-sign">−</span>
-            {DENOMINATIONS.map((value) => (
+            {DENOMINATIONS.map((value, i) => (
               <Chip
                 key={value}
                 value={value}
                 onClick={() => removeChip(value)}
-                disabled={!canRemove(value)}
-                label={`Remove ${dollars(value)}`}
+                disabled={!usable(i, roomDown)}
+                label={value >= roomDown ? "Back to the minimum raise" : `Remove ${dollars(value)}`}
               />
             ))}
           </div>
           <div className="chip-row" aria-label="Add chips to the bet">
             <span className="chip-row-sign">+</span>
-            {DENOMINATIONS.map((value) => (
+            {DENOMINATIONS.map((value, i) => (
               <Chip
                 key={value}
                 value={value}
                 onClick={() => addChip(value)}
-                disabled={!canAdd(value)}
-                label={`Add ${dollars(value)}`}
+                disabled={!usable(i, roomUp)}
+                label={value >= roomUp ? "All-in" : `Add ${dollars(value)}`}
               />
             ))}
           </div>
