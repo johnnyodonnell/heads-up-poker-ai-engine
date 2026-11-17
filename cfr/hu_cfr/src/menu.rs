@@ -75,4 +75,16 @@ impl LiveMenu {
     pub fn river_in_turn() -> LiveMenu {
         LiveMenu { bets: vec![0.5, 1.0], raises: vec![], max_raises: 2 }
     }
+
+    /// The turn of a turn solve by name: "full" (`turn`), "medium" (bets of
+    /// ⅓ and ¾ pot, pot raises, 2 per street) or "lean" (the same bets,
+    /// raises only all-in).
+    pub fn turn_by_name(name: &str) -> Option<LiveMenu> {
+        match name {
+            "full" => Some(LiveMenu::turn()),
+            "medium" => Some(LiveMenu { bets: vec![0.33, 0.75], raises: vec![1.0], max_raises: 2 }),
+            "lean" => Some(LiveMenu { bets: vec![0.33, 0.75], raises: vec![], max_raises: 2 }),
+            _ => None,
+        }
+    }
 }

@@ -78,11 +78,18 @@ pub struct LiveCfg {
     pub turn_iters: u32,
     /// Solve the 48 river cards of a turn solve in parallel.
     pub parallel: bool,
+    /// Least likelihood any opponent action gives a hand when estimating
+    /// the opponent's range (0 = trust the model fully). Keeps hands the
+    /// model says it would never play this way, for opponents who don't
+    /// play like our model.
+    pub opp_floor: f32,
+    /// The turn's menu in turn solves.
+    pub turn_menu: LiveMenu,
 }
 
 impl Default for LiveCfg {
     fn default() -> LiveCfg {
-        LiveCfg { river_iters: 400, turn_iters: 200, parallel: true }
+        LiveCfg { river_iters: 400, turn_iters: 200, parallel: true, opp_floor: 0.0, turn_menu: LiveMenu::turn() }
     }
 }
 
@@ -192,8 +199,9 @@ fn street_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, 
                 }
                 let edge = g.records(nd).iter().position(|x| *x == (a.kind, a.to)).ok_or("turn action not in the turn solve's tree")?;
                 let sg = prev.strat.get(&node).ok_or("no strategy at a turn node")?;
+                let floor = if a.seat == v.bot { 0.0 } else { e.live_cfg.opp_floor };
                 for (h, w) in r[a.seat].iter_mut().enumerate() {
-                    *w *= sg[edge * H + h];
+                    *w *= sg[edge * H + h].max(floor);
                 }
                 node = g.children(nd)[edge];
             }
@@ -230,7 +238,7 @@ fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: 
             frozen.push((j, prev.strat.get(&node).ok_or("no strategy at an earlier decision")?.clone()));
         }
     }
-    let menu = if street == Street::River { LiveMenu::river() } else { LiveMenu::turn() };
+    let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
     let g = subgame::build(&start, &forced, &menu, &LiveMenu::river_in_turn())?;
     let mut fz = Vec::with_capacity(frozen.len());
     for (j, sg) in frozen {
@@ -355,7 +363,7 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
         }
     }
     let start = state_at_street(v, k, street)?;
-    let menu = if street == Street::River { LiveMenu::river() } else { LiveMenu::turn() };
+    let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
     let g = subgame::build(&start, &v.actions[k..k + n], &menu, &LiveMenu::river_in_turn())?;
     let fz = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
     let t0 = Instant::now();

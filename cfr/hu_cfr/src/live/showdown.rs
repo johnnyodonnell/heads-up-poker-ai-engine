@@ -27,6 +27,22 @@ pub fn holes() -> &'static [[Card; 2]; H] {
     })
 }
 
+/// The 51 hands holding each card.
+pub fn with_card() -> &'static [[u16; 51]; 52] {
+    static T: OnceLock<[[u16; 51]; 52]> = OnceLock::new();
+    T.get_or_init(|| {
+        let mut t = [[0u16; 51]; 52];
+        let mut n = [0usize; 52];
+        for (h, &[a, b]) in holes().iter().enumerate() {
+            for c in [a, b] {
+                t[c as usize][n[c as usize]] = h as u16;
+                n[c as usize] += 1;
+            }
+        }
+        t
+    })
+}
+
 /// Index of the hand `[a, b]`.
 #[inline]
 pub fn hand(cards: [Card; 2]) -> usize {

@@ -483,7 +483,8 @@ impl Engine {
     /// Each seat's range after the hand's first `upto` actions as the table
     /// would have played them: per hand (`holes()` order), the product of
     /// the table's probabilities of each of that seat's actions, along the
-    /// same translated history walk `decide` does. Stops (leaving the rest
+    /// same translated history walk `decide` does (the opponent's
+    /// probabilities floored at `live_cfg.opp_floor`). Stops (leaving the rest
     /// uninformative) where the real hand leaves the abstract tree. Hands
     /// that clash with the board are not zeroed here.
     pub fn table_ranges(&self, v: &View, actions: &[hu_core::rules::HandAction], upto: usize) -> [Vec<f32>; 2] {
@@ -504,6 +505,7 @@ impl Engine {
             let st = ha.street.index();
             let board = &v.board[..[0, 3, 4, 5][st]];
             let n = nd.n as usize;
+            let floor = if ha.seat == v.bot { 0.0 } else { self.live_cfg.opp_floor };
             for (h, w) in r[ha.seat].iter_mut().enumerate() {
                 if *w == 0.0 {
                     continue;
@@ -514,7 +516,7 @@ impl Engine {
                     continue;
                 }
                 strat.probs(node, self.abs.bucket(st, [a, b], board), &mut p[..n]);
-                *w *= p[k] as f32;
+                *w *= (p[k] as f32).max(floor);
             }
             node = tree.children(nd)[k];
         }

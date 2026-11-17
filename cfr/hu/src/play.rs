@@ -10,7 +10,8 @@
 //!       to equilibrium they get
 //!
 //! Live flags (eval, serve, slumbot, livebench): --live off|river|turn,
-//! --river-iters N, --turn-iters N. `run:OTHER` rivals always play their
+//! --river-iters N, --turn-iters N, --turn-menu full|medium|lean, --opp-floor F (least likelihood of an
+//! opponent action when estimating its range). `run:OTHER` rivals always play their
 //! table only (`run:NAME` with the same run: the run without live solving).
 
 use std::path::PathBuf;
@@ -68,6 +69,12 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
     }
     e.live_cfg.river_iters = num(args, "--river-iters", e.live_cfg.river_iters);
     e.live_cfg.turn_iters = num(args, "--turn-iters", e.live_cfg.turn_iters);
+    if let Some(m) = flag(args, "--turn-menu") {
+        e.live_cfg.turn_menu = hu_cfr::menu::LiveMenu::turn_by_name(&m).unwrap_or_else(|| panic!("--turn-menu full|medium|lean, not {m}"));
+    }
+    if let Some(f) = flag(args, "--opp-floor") {
+        e.live_cfg.opp_floor = f.parse().expect("--opp-floor 0..1");
+    }
 }
 
 /// "full", "sampled" or "NNbb".

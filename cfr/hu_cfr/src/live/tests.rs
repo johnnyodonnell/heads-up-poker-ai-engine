@@ -183,3 +183,32 @@ fn convergence_curves() {
         }
     }
 }
+
+/// Turn tree sizes and iteration cost for candidate menus (run with
+/// --ignored --nocapture).
+#[test]
+#[ignore]
+fn turn_menu_costs() {
+    let m = |bets: &[f64], raises: &[f64], max_raises| LiveMenu { bets: bets.to_vec(), raises: raises.to_vec(), max_raises };
+    let menus = [
+        ("current", LiveMenu::turn(), LiveMenu::river_in_turn()),
+        ("half/pot, raise pot, 2", m(&[0.5, 1.0], &[1.0], 2), m(&[0.5, 1.0], &[], 2)),
+        ("third/3q, jam raises", m(&[0.33, 0.75], &[], 2), m(&[0.5, 1.0], &[], 2)),
+        ("third/3q, jam raises, river 3q", m(&[0.33, 0.75], &[], 2), m(&[0.75], &[], 1)),
+    ];
+    let mut rng = SmallRng::seed_from_u64(1);
+    let ranges = random_ranges(&mut rng);
+    for seed in [4, 7] {
+        let s = at_street(Street::Turn, seed);
+        for (name, turn, river) in &menus {
+            let g = subgame::build(&s, &[], turn, river).unwrap();
+            let river_nodes = g.nodes.iter().filter(|n| n.river && matches!(n.kind, Kind::Decision(_))).count();
+            let mut sv = Solver::new(&g, &s.community, ranges.clone(), vec![], true);
+            let t0 = std::time::Instant::now();
+            sv.run(20);
+            let ms = t0.elapsed().as_secs_f64() * 1000.0 / 20.0;
+            println!("{name:32} {} decision nodes ({} river): {ms:.1} ms/iteration", g.decisions(), river_nodes);
+        }
+    }
+}
+
