@@ -7,6 +7,7 @@ import {
   advanceStreet,
 } from "../engine/game";
 import type { EngineState } from "../engine/game";
+import { loadTable, saveTable } from "../engine/saved";
 // The bot's engine. Swap this one import to plug in a different engine.
 import { bestMove, onDecision } from "../engine/remote";
 import type { BotDecision } from "../engine/remote";
@@ -64,7 +65,7 @@ export function useGameState(): {
   engineError: string | null;
   decisions: BotDecision[];
 } {
-  const [engine, setEngine] = useState<EngineState>(() => createTable());
+  const [engine, setEngine] = useState<EngineState>(loadTable);
   const [busy, setBusy] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<BotDecision[]>([]);
@@ -85,6 +86,7 @@ export function useGameState(): {
   const set = useCallback((s: EngineState) => {
     engineRef.current = s;
     setEngine(s);
+    saveTable(s);
   }, []);
 
   // Show `start`, then let the bot play until the human is up again.
