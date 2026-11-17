@@ -10,7 +10,7 @@
 //!       build the hand-group tables into $HU_HOME/data/NAME/
 //!   train --run NAME --abs ABS --stack 200 --iters 1e9   train one stack depth (resumable)
 //!   export --run NAME --abs ABS --stack 200              export from the latest checkpoint
-//!   eval --run NAME [--vs all|bot,...] [--deals 20000] [--stacks full|sampled]
+//!   eval --run NAME [--vs all|bot,...|run:OTHER] [--deals 20000] [--stacks full|sampled]
 //!   probe --run NAME [--stack 200]                       preflop charts
 //!   serve --run NAME [--port 8790] [--web DIR]           the engine over HTTP + the web app
 

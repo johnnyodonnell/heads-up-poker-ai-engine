@@ -58,11 +58,14 @@ pub fn eval_cmd(args: &[String]) {
     let names: Vec<String> = if vs == "all" { PANEL.iter().map(|s| s.to_string()).collect() } else { vs.split(',').map(String::from).collect() };
     let engine = load_engine(&run);
     let me = Player::Engine(&engine);
+    // `run:NAME` plays against another trained run instead of a scripted bot.
+    let rivals: Vec<(String, Engine)> = names.iter().filter_map(|n| n.strip_prefix("run:")).map(|r| (r.to_string(), load_engine(r))).collect();
     for name in names {
         let t = Instant::now();
-        let opp = match Bot::parse(&name) {
-            Some(b) => Player::Bot(b),
-            None => panic!("unknown bot {name}"),
+        let opp = match (Bot::parse(&name), name.strip_prefix("run:")) {
+            (Some(b), _) => Player::Bot(b),
+            (None, Some(r)) => Player::Engine(&rivals.iter().find(|(n, _)| n == r).unwrap().1),
+            (None, None) => panic!("unknown bot {name}"),
         };
         let r = play_match(&me, &opp, deals, stacks, seed);
         log(format!(
