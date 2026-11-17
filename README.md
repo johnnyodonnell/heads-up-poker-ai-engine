@@ -31,6 +31,23 @@ The **Debug** toggle (top left) shows the bot's cards face up and, for each of
 its decisions this hand, the strategy it used (stack depth), its hand group,
 the options it was choosing between with their probabilities, and its pick.
 
+## The trained strategy
+
+The strategy the bot plays is too big for git (about 8 GB on disk), so it is
+saved in a GitHub Release instead:
+[**`strategy-v1c`**](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1c)
+(checkpoint C, served since 2026-11-17). To put it back on the box, for
+example after a disk loss, without retraining (~10 h):
+
+```sh
+cfr/box.sh ./release_restore.sh strategy-v1c
+cfr/box.sh 'echo v1c > $HU_HOME/current_run && pm2 restart hu-engine'
+```
+
+The restore takes a couple of minutes and checks every file against the
+release's SHA-256 sums. See [Saved runs](cfr/README.md#saved-runs) for what
+the release holds, restoring onto a fresh box, and saving a new run.
+
 ## Developing
 
 ```sh

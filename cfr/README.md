@@ -73,20 +73,72 @@ updates the web app it serves. `GET /api/health` shows what's loaded.
 
 ## Saved runs
 
-Trained runs are too big for git, so they live in GitHub Releases tagged
-`strategy-RUN`: the card abstraction and the strategy (all that serving
-needs, ~1.4 GB compressed for v1c), plus the solver checkpoints to resume
-training, with SHA-256 sums of every file.
+Trained runs are too big for git (v1c is 7.2 GB of card abstraction, 1 GB
+of strategy and 16 GB of solver checkpoints), so each one is saved to a
+GitHub Release tagged `strategy-RUN`, created at the commit whose code reads
+its files.
+
+| Release | Run | Abstraction | Commit | Notes |
+|---|---|---|---|---|
+| [`strategy-v1c`](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1c) | v1c (checkpoint C) | a10k: 169/10000/5000/2000 | 01ed9ef | served since 2026-11-17 |
+
+### What a release holds
+
+| Asset | Restores to | Size (v1c) | Needed for |
+|---|---|---|---|
+| `abstraction-ABS.tar.zst` | `data/ABS/` | 0.78 GB | serving: maps cards to hand groups |
+| `strategy-RUN.tar.zst` | `strategies/RUN/` | 0.59 GB | serving: the lookup table, every stack depth |
+| `checkpoint-RUN-sN.zst.partNN` | `runs/RUN/sN/solver.ckpt` | ~13 GB in all | only to resume training a depth |
+| `SHA256SUMS` | | | checksums of every original file |
+| `release.env` | | | the run and abstraction names, for the restore script |
+
+The abstraction must be saved with the strategy: the strategy is indexed by
+its hand groups, and rebuilding it (multithreaded k-means) isn't guaranteed to
+come out identical. The strategy itself could be re-exported from the
+checkpoints (`hu export`), but it is saved directly so serving needs only
+the two small assets.
+
+### Restoring
+
+`release_restore.sh` downloads with `gh` (logged in), unpacks with `zstd`, and
+verifies every file against `SHA256SUMS`. It never overwrites an existing
+run or abstraction directory. It needs ~8.3 GB free, plus 16 GB with
+`--checkpoints`.
 
 ```sh
-# save (on the box): RUN, its abstraction, and the commit whose code reads them
-cfr/box_bg.sh release-v1c ./release_save.sh v1c a10k <commit-sha>
-# restore into $HU_HOME (on the box); add --checkpoints to resume training too
+# on the box (into $HU_HOME); add --checkpoints to resume training too
 cfr/box.sh ./release_restore.sh strategy-v1c
 cfr/box.sh 'echo v1c > $HU_HOME/current_run && pm2 restart hu-engine'
 ```
 
-Released: `strategy-v1c` (checkpoint C, served since 2026-11-17).
+On a fresh box (with Rust, Node + pm2, `gh` logged in, and `zstd`), first put
+the code in place and build it, then restore, then start the service once:
+
+```sh
+cfr/sync_to_box.sh
+cfr/box.sh cargo build --release -p hu
+cfr/box.sh ./release_restore.sh strategy-v1c
+cfr/box.sh 'echo v1c > $HU_HOME/current_run && pm2 start pm2.config.cjs && pm2 save'
+cfr/deploy_web.sh
+```
+
+The script also works on any other machine with `gh` and `zstd`, with
+`HU_HOME` pointing at where the files should go:
+`HU_HOME=/some/dir cfr/release_restore.sh strategy-v1c`. If the file formats
+change in later code, build the release's commit to read it.
+
+### Saving a new run
+
+```sh
+# on the box: RUN, its abstraction, and the (pushed) commit whose code reads them
+cfr/box_bg.sh release-v1d ./release_save.sh v1d a10k <commit-sha>
+cfr/box.sh tail -f '$HU_HOME/logs/release-v1d.log'
+```
+
+The abstraction and strategy go up first, then the checkpoints one depth at a
+time, compressed and split under GitHub's 2 GiB asset limit (the box
+uploads at roughly 4 MB/s, so v1c's checkpoints take about an hour). Pass
+`--no-checkpoints` to skip them. Add the release to the table above.
 
 ## Parity with the TS game
 
