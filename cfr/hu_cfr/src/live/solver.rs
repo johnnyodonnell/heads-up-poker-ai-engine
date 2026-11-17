@@ -405,33 +405,44 @@ fn subtree_end(g: &Subgame, node: usize) -> usize {
     end
 }
 
-/// Regret matching (n × H, action-major).
+/// Regret matching (n × H, action-major). Loops run over hands innermost
+/// (contiguous, vectorized).
 fn regret_match(regret: &[f32], n: usize, out: &mut [f32]) {
-    for h in 0..H {
-        let mut total = 0f32;
-        for a in 0..n {
-            total += regret[a * H + h].max(0.0);
+    let mut total = [0f32; H];
+    for a in 0..n {
+        let r = &regret[a * H..(a + 1) * H];
+        let o = &mut out[a * H..(a + 1) * H];
+        for h in 0..H {
+            let x = r[h].max(0.0);
+            o[h] = x;
+            total[h] += x;
         }
-        if total > 0.0 {
-            for a in 0..n {
-                out[a * H + h] = regret[a * H + h].max(0.0) / total;
-            }
-        } else {
-            for a in 0..n {
-                out[a * H + h] = 1.0 / n as f32;
-            }
+    }
+    let uniform = 1.0 / n as f32;
+    for a in 0..n {
+        let o = &mut out[a * H..(a + 1) * H];
+        for h in 0..H {
+            o[h] = if total[h] > 0.0 { o[h] / total[h] } else { uniform };
         }
     }
 }
 
+/// Normalize strategy sums (n × H) into a strategy, uniform where a hand
+/// has none.
 fn normalize(sum: &[f32], n: usize, out: &mut [f32]) {
-    for h in 0..H {
-        let mut total = 0f32;
-        for a in 0..n {
-            total += sum[a * H + h];
+    let mut total = [0f32; H];
+    for a in 0..n {
+        let s = &sum[a * H..(a + 1) * H];
+        for h in 0..H {
+            total[h] += s[h];
         }
-        for a in 0..n {
-            out[a * H + h] = if total > 0.0 { sum[a * H + h] / total } else { 1.0 / n as f32 };
+    }
+    let uniform = 1.0 / n as f32;
+    for a in 0..n {
+        let s = &sum[a * H..(a + 1) * H];
+        let o = &mut out[a * H..(a + 1) * H];
+        for h in 0..H {
+            o[h] = if total[h] > 0.0 { s[h] / total[h] } else { uniform };
         }
     }
 }

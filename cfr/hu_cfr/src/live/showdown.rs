@@ -87,12 +87,17 @@ pub fn pair_weight(a: &[f32], b: &[f32]) -> f64 {
     a.iter().zip(&d).map(|(&x, &y)| x as f64 * y as f64).sum()
 }
 
-/// One complete (5-card) board: its hands sorted by strength.
+/// One complete (5-card) board: its hands sorted by strength, stored as
+/// parallel arrays with the boundaries of equal-strength groups.
 pub struct Board {
     pub cards: [Card; 5],
-    /// (strength, hand, card a, card b), weakest first; hands touching the
-    /// board are left out.
-    hands: Vec<(u32, u16, u8, u8)>,
+    /// Hand index of each sorted position (hands touching the board left out).
+    idx: Vec<u16>,
+    /// Its two cards.
+    ca: Vec<u8>,
+    cb: Vec<u8>,
+    /// Start of each group of equal strength, then the number of hands.
+    groups: Vec<u32>,
 }
 
 impl Board {
@@ -109,56 +114,64 @@ impl Board {
             hands.push((eval7(&seven), h as u16, a, b));
         }
         hands.sort_unstable_by_key(|x| (x.0, x.1));
-        Board { cards, hands }
+        let mut groups = Vec::new();
+        for (i, x) in hands.iter().enumerate() {
+            if i == 0 || hands[i - 1].0 != x.0 {
+                groups.push(i as u32);
+            }
+        }
+        groups.push(hands.len() as u32);
+        Board {
+            cards,
+            idx: hands.iter().map(|x| x.1).collect(),
+            ca: hands.iter().map(|x| x.2).collect(),
+            cb: hands.iter().map(|x| x.3).collect(),
+            groups,
+        }
     }
 
     /// Showdown for `s` chips each: `out[h] = s × (opponent weight `h` beats
     /// − weight that beats `h`)`, disjoint hands only, ties paying nothing.
     /// Hands touching the board get 0.
     pub fn showdown(&self, opp: &[f32], s: f32, out: &mut [f32]) {
-        out.fill(0.0);
-        let hs = &self.hands;
-        let n = hs.len();
+        let n = self.idx.len();
+        let (idx, ca, cb) = (&self.idx[..], &self.ca[..], &self.cb[..]);
+        let mut w = [0f32; H];
+        for k in 0..n {
+            w[k] = opp[idx[k] as usize];
+        }
         // Up: weight strictly below each hand.
+        let mut net = [0f32; H];
         let mut below = 0f32;
         let mut card = [0f32; 52];
-        let mut i = 0;
-        while i < n {
-            let mut j = i;
-            while j < n && hs[j].0 == hs[i].0 {
-                j += 1;
+        for g in self.groups.windows(2) {
+            let (i, j) = (g[0] as usize, g[1] as usize);
+            for k in i..j {
+                net[k] = below - card[ca[k] as usize] - card[cb[k] as usize];
             }
-            for &(_, h, a, b) in &hs[i..j] {
-                out[h as usize] = below - card[a as usize] - card[b as usize];
+            for k in i..j {
+                below += w[k];
+                card[ca[k] as usize] += w[k];
+                card[cb[k] as usize] += w[k];
             }
-            for &(_, h, a, b) in &hs[i..j] {
-                let w = opp[h as usize];
-                below += w;
-                card[a as usize] += w;
-                card[b as usize] += w;
-            }
-            i = j;
         }
-        // Down: weight strictly above.
+        // Down: minus the weight strictly above.
         let mut above = 0f32;
         let mut card = [0f32; 52];
-        let mut j = n;
-        while j > 0 {
-            let mut i = j;
-            while i > 0 && hs[i - 1].0 == hs[j - 1].0 {
-                i -= 1;
+        for g in self.groups.windows(2).rev() {
+            let (i, j) = (g[0] as usize, g[1] as usize);
+            for k in i..j {
+                net[k] -= above - card[ca[k] as usize] - card[cb[k] as usize];
             }
-            for &(_, h, a, b) in &hs[i..j] {
-                let o = &mut out[h as usize];
-                *o = s * (*o - (above - card[a as usize] - card[b as usize]));
+            for k in i..j {
+                above += w[k];
+                card[ca[k] as usize] += w[k];
+                card[cb[k] as usize] += w[k];
             }
-            for &(_, h, a, b) in &hs[i..j] {
-                let w = opp[h as usize];
-                above += w;
-                card[a as usize] += w;
-                card[b as usize] += w;
-            }
-            j = i;
+        }
+        out.fill(0.0);
+        for k in 0..n {
+            out[idx[k] as usize] = s * net[k];
         }
     }
 }
