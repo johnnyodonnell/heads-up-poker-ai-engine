@@ -13,9 +13,11 @@
 //!   eval --run NAME [--vs all|bot,...|run:OTHER] [--deals 20000] [--stacks full|sampled]
 //!   probe --run NAME [--stack 200]                       preflop charts
 //!   serve --run NAME [--port 8790] [--web DIR]           the engine over HTTP + the web app
+//!   slumbot --run NAME [--hands 1000] [--sessions 1]     play Slumbot through its public API
 
 mod play;
 mod serve;
+mod slumbot;
 mod train;
 mod util;
 
@@ -161,8 +163,9 @@ fn main() {
         Some("eval") => play::eval_cmd(&args),
         Some("probe") => play::probe_cmd(&args),
         Some("serve") => serve::serve_cmd(&args),
+        Some("slumbot") => slumbot::slumbot_cmd(&args),
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | probe | serve");
+            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | probe | serve | slumbot");
             std::process::exit(2);
         }
     }

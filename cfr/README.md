@@ -62,6 +62,7 @@ cfr/box.sh tail -n 3 '$HU_HOME/logs/train-v1b.log'
 # 3. check it
 cfr/box.sh ./target/release/hu eval --run v1b                 # vs the scripted bots
 cfr/box.sh ./target/release/hu probe --run v1b                # preflop charts
+cfr/box_bg.sh slumbot-v1b ./target/release/hu slumbot --run v1b --hands 10000 --sessions 2   # vs Slumbot (200bb)
 # 4. serve it
 cfr/box.sh 'echo v1b > $HU_HOME/current_run && pm2 restart hu-engine'
 ```
