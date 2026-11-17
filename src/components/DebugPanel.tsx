@@ -32,9 +32,18 @@ export default function DebugPanel({ enabled, onToggle, decisions }: DebugPanelP
                 {d.debug.bucket_label && <span> · {d.debug.bucket_label}</span>}
                 <span className="debug-dim">
                   {" "}
-                  · {d.debug.effective_bb}bb deep, {d.debug.strategy_bb}bb strategy
+                  · {d.debug.effective_bb}bb deep
+                  {d.debug.live ? "" : `, ${d.debug.strategy_bb}bb strategy`}
                 </span>
               </div>
+              {d.debug.live && (
+                <div className="debug-path" title="Solved on the box for this spot, from the start of the street">
+                  Solved live in {(d.debug.live.ms / 1000).toFixed(1)}s ({d.debug.live.iterations} iterations,{" "}
+                  {d.debug.live.decision_nodes} decision points), within {d.debug.live.exploitability_pct.toFixed(1)}% of the
+                  pot of equilibrium · ranges: bot {Math.round(d.debug.live.bot_range)}, you{" "}
+                  {Math.round(d.debug.live.opp_range)} hand combos
+                </div>
+              )}
               {d.debug.path.length > 0 && (
                 <div className="debug-path" title="The betting so far, as the strategy saw it">
                   {d.debug.path.join(" → ")}
@@ -47,7 +56,7 @@ export default function DebugPanel({ enabled, onToggle, decisions }: DebugPanelP
                   <tbody>
                     {d.debug.options.map((o, j) => (
                       <tr key={j} className={o.prob >= 0.005 ? "" : "debug-zero"}>
-                        <td className="debug-opt">{o.action}</td>
+                        <td className="debug-opt">{d.debug.live ? o.label : o.action}</td>
                         <td className="debug-bar">
                           <div style={{ width: pct(o.prob) }} />
                         </td>

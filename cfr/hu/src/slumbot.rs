@@ -2,7 +2,7 @@
 //! (https://slumbot.com, API section): heads-up NLHE with blinds 50/100 and
 //! 200bb stacks that reset every hand.
 //!
-//!   hu slumbot --run v1c [--hands 1000] [--sessions 1]
+//!   hu slumbot --run v1c [--hands 1000] [--sessions 1] [--live river]
 //!
 //! Slumbot chips are 50 engine chips' worth of ours (blinds 1/2), so its bet
 //! sizes are rounded to the nearest engine chip (and clamped to legal) when
@@ -26,7 +26,7 @@ use hu_cfr::engine::{Engine, HistAction, View};
 use hu_core::cards::{parse, Card};
 use hu_core::rules::{Action, ActionType, Phase, State};
 
-use crate::play::load_engine;
+use crate::play::{live_flags, load_engine};
 use crate::util::{flag, hu_home, log, num};
 
 const API: &str = "https://slumbot.com/slumbot/api/";
@@ -247,13 +247,15 @@ pub fn slumbot_cmd(args: &[String]) {
     let run = flag(args, "--run").expect("--run NAME");
     let hands: usize = num(args, "--hands", 1000);
     let sessions: usize = num(args, "--sessions", 1);
-    let engine = load_engine(&run);
-    let path = hu_home().join("logs").join(format!("slumbot-{run}.jsonl"));
+    let mut engine = load_engine(&run);
+    live_flags(args, &mut engine);
+    let tag = if engine.live == hu_cfr::live::LiveMode::Off { run.clone() } else { format!("{run}-live-{}", engine.live.name()) };
+    let path = hu_home().join("logs").join(format!("slumbot-{tag}.jsonl"));
     let out = Mutex::new(OpenOptions::new().create(true).append(true).open(&path).expect("open hand log"));
     let tally = Mutex::new(Tally { hands: 0, raw: Stat::default(), vs_baseline: Stat::default(), decisions: 0, fallbacks: 0 });
     let next = AtomicUsize::new(0);
     let t0 = Instant::now();
-    log(format!("{run} vs Slumbot: {hands} hands over {sessions} session(s); hands logged to {}", path.display()));
+    log(format!("{tag} vs Slumbot: {hands} hands over {sessions} session(s); hands logged to {}", path.display()));
 
     std::thread::scope(|sc| {
         for k in 0..sessions {
@@ -301,7 +303,7 @@ pub fn slumbot_cmd(args: &[String]) {
     });
     let t = tally.lock().unwrap();
     log(format!(
-        "{run} vs Slumbot: {} (vs Slumbot's baseline {}) over {} hands ({} decisions, {} fallbacks) in {:.1} min",
+        "{tag} vs Slumbot: {} (vs Slumbot's baseline {}) over {} hands ({} decisions, {} fallbacks) in {:.1} min",
         t.raw.show(),
         t.vs_baseline.show(),
         t.hands,

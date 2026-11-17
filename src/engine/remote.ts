@@ -14,6 +14,18 @@ export interface DecisionOption {
   prob: number;
 }
 
+// Set when the decision was solved live on the box (turn/river).
+export interface LiveDebug {
+  street: string;
+  solves: number;
+  ms: number;
+  iterations: number;
+  decision_nodes: number;
+  exploitability_pct: number;
+  bot_range: number;
+  opp_range: number;
+}
+
 export interface DecisionDebug {
   effective_bb: number;
   strategy_bb: number;
@@ -25,6 +37,7 @@ export interface DecisionDebug {
   options: DecisionOption[];
   chosen: string;
   fallback: string | null;
+  live?: LiveDebug | null;
 }
 
 export interface BotDecision {

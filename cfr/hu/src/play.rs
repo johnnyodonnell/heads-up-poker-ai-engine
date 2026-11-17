@@ -1,18 +1,34 @@
-//! Loading a run's strategies into an engine; `hu eval` and `hu probe`.
+//! Loading a run's strategies into an engine; `hu eval`, `hu probe` and
+//! `hu livebench`.
 //!
-//!   hu eval --run NAME [--vs all|station,maniac,...] [--deals 20000] [--stacks full|sampled]
+//!   hu eval --run NAME [--vs all|station,maniac,...|run:OTHER] [--deals 20000]
+//!       [--stacks full|sampled|200bb] [live flags]
 //!   hu probe --run NAME [--stack 200]   preflop charts: the small blind's first
 //!       action and the big blind facing a 2.5bb open
+//!   hu livebench --run NAME [--street river|turn] [--spots 20] [--iters 100,200,400]
+//!       [--stack 400]   time live solves of real spots and measure how close
+//!       to equilibrium they get
+//!
+//! Live flags (eval, serve, slumbot, livebench): --live off|river|turn,
+//! --river-iters N, --turn-iters N. `run:OTHER` rivals always play their
+//! table only (`run:NAME` with the same run: the run without live solving).
 
 use std::path::PathBuf;
 use std::time::Instant;
 
+use rand::rngs::SmallRng;
+use rand::seq::SliceRandom;
+use rand::{Rng, SeedableRng};
+
 use hu_cfr::bots::{Bot, PANEL};
 use hu_cfr::classes::{class_hands, N_CLASSES};
-use hu_cfr::engine::Engine;
+use hu_cfr::engine::{view_of, Engine};
 use hu_cfr::eval::{play_match, Player, Stacks};
 use hu_cfr::game::{Act, MAX_ACTIONS};
+use hu_cfr::live::{self, LiveMode};
 use hu_cfr::strategy::StrategyMeta;
+use hu_core::allin_ev::is_runout;
+use hu_core::rules::{Phase, State, Street};
 
 use crate::util::{flag, hu_home, log, num};
 
@@ -45,31 +61,55 @@ pub fn load_engine(run: &str) -> Engine {
     e
 }
 
+/// Apply the live-solving flags to an engine.
+pub fn live_flags(args: &[String], e: &mut Engine) {
+    if let Some(m) = flag(args, "--live") {
+        e.live = LiveMode::parse(&m).unwrap_or_else(|| panic!("--live off|river|turn, not {m}"));
+    }
+    e.live_cfg.river_iters = num(args, "--river-iters", e.live_cfg.river_iters);
+    e.live_cfg.turn_iters = num(args, "--turn-iters", e.live_cfg.turn_iters);
+}
+
+/// "full", "sampled" or "NNbb".
+fn parse_stacks(s: Option<&str>) -> Stacks {
+    match s {
+        None | Some("full") => Stacks::Full,
+        Some("sampled") => Stacks::Sampled,
+        Some(x) => match x.strip_suffix("bb").and_then(|n| n.parse::<i32>().ok()) {
+            Some(bb) => Stacks::Fixed(bb * 2),
+            None => panic!("--stacks full|sampled|NNbb, not {x}"),
+        },
+    }
+}
+
 pub fn eval_cmd(args: &[String]) {
     let run = flag(args, "--run").expect("--run NAME");
     let deals: usize = num(args, "--deals", 20_000);
     let seed: u64 = num(args, "--seed", 1);
-    let stacks = match flag(args, "--stacks").as_deref() {
-        None | Some("full") => Stacks::Full,
-        Some("sampled") => Stacks::Sampled,
-        Some(other) => panic!("--stacks full|sampled, not {other}"),
-    };
+    let stacks = parse_stacks(flag(args, "--stacks").as_deref());
     let vs = flag(args, "--vs").unwrap_or("all".into());
     let names: Vec<String> = if vs == "all" { PANEL.iter().map(|s| s.to_string()).collect() } else { vs.split(',').map(String::from).collect() };
-    let engine = load_engine(&run);
-    let me = Player::Engine(&engine);
-    // `run:NAME` plays against another trained run instead of a scripted bot.
-    let rivals: Vec<(String, Engine)> = names.iter().filter_map(|n| n.strip_prefix("run:")).map(|r| (r.to_string(), load_engine(r))).collect();
+    let mut engine = load_engine(&run);
+    live_flags(args, &mut engine);
+    // Batch runs parallelize across hands, not inside a solve.
+    engine.live_cfg.parallel = false;
+    let me = Player::Engine(&engine, engine.live);
+    let label = if engine.live == LiveMode::Off { run.clone() } else { format!("{run} (live {})", engine.live.name()) };
+    // `run:NAME` plays against another trained run (its table only) instead
+    // of a scripted bot.
+    let rivals: Vec<(String, Engine)> =
+        names.iter().filter_map(|n| n.strip_prefix("run:")).filter(|r| *r != run).map(|r| (r.to_string(), load_engine(r))).collect();
     for name in names {
         let t = Instant::now();
         let opp = match (Bot::parse(&name), name.strip_prefix("run:")) {
             (Some(b), _) => Player::Bot(b),
-            (None, Some(r)) => Player::Engine(&rivals.iter().find(|(n, _)| n == r).unwrap().1),
+            (None, Some(r)) if r == run => Player::Engine(&engine, LiveMode::Off),
+            (None, Some(r)) => Player::Engine(&rivals.iter().find(|(n, _)| n == r).unwrap().1, LiveMode::Off),
             (None, None) => panic!("unknown bot {name}"),
         };
         let r = play_match(&me, &opp, deals, stacks, seed);
         log(format!(
-            "{run} vs {name:<8} {:+8.1} ± {:5.1} bb/100  ({} hands, {:?} stacks, {} decisions, {} fallbacks, {:.1}s)",
+            "{label} vs {name:<8} {:+8.1} ± {:5.1} bb/100  ({} hands, {:?} stacks, {} decisions, {} fallbacks, {:.1}s)",
             r.bb100,
             r.ci95,
             r.hands,
@@ -153,5 +193,98 @@ pub fn probe_cmd(args: &[String]) {
             }
         }
         chart("big blind facing a 2.5bb open", &["fold", "call", "3-bet"], &rows);
+    }
+}
+
+pub fn livebench_cmd(args: &[String]) {
+    let run = flag(args, "--run").expect("--run NAME");
+    let street = match flag(args, "--street").as_deref() {
+        None | Some("river") => Street::River,
+        Some("turn") => Street::Turn,
+        Some(x) => panic!("--street river|turn, not {x}"),
+    };
+    let n: usize = num(args, "--spots", 20);
+    let stack: i32 = num(args, "--stack", 400);
+    let seed: u64 = num(args, "--seed", 1);
+    let iters: Vec<u32> = flag(args, "--iters").unwrap_or("100,200,400".into()).split(',').map(|x| x.parse().expect("--iters")).collect();
+    let mut engine = load_engine(&run);
+    live_flags(args, &mut engine);
+    let mode = if street == Street::River { LiveMode::River } else { LiveMode::Turn };
+
+    // Spots: the table plays both seats until someone acts on `street`.
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut spots = Vec::new();
+    while spots.len() < n {
+        let mut deck: Vec<u8> = (0..52).collect();
+        deck.shuffle(&mut rng);
+        let mut s = State::new_table([stack; 2]);
+        s.button = rng.gen_range(0..2);
+        s.start_hand(deck);
+        let hseed: u64 = rng.gen();
+        loop {
+            match s.phase {
+                Phase::Betting => {
+                    let seat = s.to_act as usize;
+                    let v = view_of(&s, seat, [stack; 2], hseed);
+                    if s.street == street {
+                        spots.push(v);
+                        break;
+                    }
+                    let d = engine.decide_mode(&v, &mut rng, LiveMode::Off).expect("decide");
+                    s.apply(d.action);
+                }
+                Phase::StreetComplete if !is_runout(&s) => s.advance_street(),
+                _ => break,
+            }
+        }
+    }
+    log(format!("{} {:?} spots at {}bb (live {})", spots.len(), street, stack / 2, mode.name()));
+    if args.iter().any(|a| a == "--show") {
+        // Table vs live, spot by spot.
+        for v in &spots {
+            let mut r = SmallRng::seed_from_u64(1);
+            let t = engine.decide_mode(v, &mut r, LiveMode::Off).expect("table");
+            let l = engine.decide_mode(v, &mut r, mode).expect("live");
+            let show = |d: &hu_cfr::engine::Debug| d.options.iter().map(|o| format!("{} {:.0}%", o.label, o.prob * 100.0)).collect::<Vec<_>>().join(", ");
+            println!(
+                "[{} | {}] {}",
+                hu_cfr::engine::cards_str(&v.hole),
+                hu_cfr::engine::cards_str(&v.board),
+                v.actions.iter().map(|a| format!("{}{:?}{}", if a.seat == v.bot { "B:" } else { "o:" }, a.kind, a.to)).collect::<Vec<_>>().join(" ")
+            );
+            println!("    table ({}): {}", t.debug.bucket_label.clone().unwrap_or_default(), show(&t.debug));
+            let ld = l.debug.live.as_ref().unwrap();
+            println!(
+                "    live  ({} ms, {:.2}% pot, ranges bot {:.0} opp {:.0}): {}",
+                ld.ms, ld.exploitability_pct, ld.bot_range, ld.opp_range, show(&l.debug)
+            );
+        }
+    }
+    for &it in &iters {
+        let mut ms = Vec::new();
+        let mut pct = Vec::new();
+        let mut nodes = 0;
+        let mut floats = 0;
+        for v in &spots {
+            let (t, x, nd, fl) = live::bench(&engine, v, mode, it).expect("bench");
+            ms.push(t as f64);
+            pct.push(x);
+            nodes = nodes.max(nd);
+            floats = floats.max(fl);
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            v[v.len() / 2]
+        };
+        let mean_ms = ms.iter().sum::<f64>() / ms.len() as f64;
+        let max_ms = ms.iter().cloned().fold(0.0, f64::max);
+        let mean_pct = pct.iter().sum::<f64>() / pct.len() as f64;
+        let max_pct = pct.iter().cloned().fold(0.0, f64::max);
+        log(format!(
+            "{it:>5} iterations: {mean_ms:6.0} ms mean, {:6.0} median, {max_ms:6.0} max | exploitability {mean_pct:.2}% of the pot mean, {:.2}% median, {max_pct:.2}% max | up to {nodes} decision nodes, {:.0} MB",
+            med(&mut ms),
+            med(&mut pct),
+            floats as f64 * 4.0 / 1e6
+        ));
     }
 }

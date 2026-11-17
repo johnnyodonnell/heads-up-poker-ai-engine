@@ -20,9 +20,11 @@ use hu_core::table::sample_stacks;
 
 use crate::bots::Bot;
 use crate::engine::{view_of, Engine};
+use crate::live::LiveMode;
 
 pub enum Player<'a> {
-    Engine(&'a Engine),
+    /// An engine, solving live per the mode.
+    Engine(&'a Engine, LiveMode),
     Bot(Bot),
 }
 
@@ -32,6 +34,9 @@ pub enum Stacks {
     Full,
     /// The app's freeze-out spread: 40% 100bb, else a random split of 400 chips.
     Sampled,
+    /// Both players start every hand with this many chips (e.g. 400 = 200bb,
+    /// Slumbot's depth).
+    Fixed(i32),
 }
 
 #[derive(Debug)]
@@ -62,9 +67,9 @@ fn play_hand(players: [&Player; 2], stacks: [i32; 2], button: usize, deck: Vec<u
                 let seat = s.to_act as usize;
                 let action = match players[seat] {
                     Player::Bot(b) => b.act(&s, &mut rng),
-                    Player::Engine(e) => {
+                    Player::Engine(e, mode) => {
                         let v = view_of(&s, seat, start, seed);
-                        let d = e.decide(&v, &mut rng).unwrap_or_else(|err| panic!("engine error: {err}"));
+                        let d = e.decide_mode(&v, &mut rng, *mode).unwrap_or_else(|err| panic!("engine error: {err}"));
                         c.decisions.fetch_add(1, Relaxed);
                         if d.debug.fallback.is_some() {
                             c.fallbacks.fetch_add(1, Relaxed);
@@ -98,6 +103,7 @@ pub fn play_match(a: &Player, b: &Player, deals: usize, stacks: Stacks, seed: u6
             let st = match stacks {
                 Stacks::Full => [STARTING_STACK; 2],
                 Stacks::Sampled => sample_stacks(&mut rng),
+                Stacks::Fixed(c) => [c; 2],
             };
             let button = rng.gen_range(0..2usize);
             let mut deck: Vec<u8> = (0..52).collect();

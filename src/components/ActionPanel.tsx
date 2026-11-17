@@ -86,7 +86,17 @@ export default function ActionPanel({
     );
   }
 
-  if (!humanCanAct || isProcessingBots) {
+  if (isProcessingBots) {
+    // The bot's move comes from the engine service; live solves take a
+    // second or two.
+    return (
+      <div className="action-panel">
+        <span className="action-thinking">Bot is thinking…</span>
+      </div>
+    );
+  }
+
+  if (!humanCanAct) {
     return null;
   }
 

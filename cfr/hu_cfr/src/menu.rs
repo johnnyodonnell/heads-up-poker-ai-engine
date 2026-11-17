@@ -45,3 +45,34 @@ impl Menu {
         &lists[(raises as usize).min(lists.len() - 1)]
     }
 }
+
+/// Bet sizes for live solving (`crate::live`), as fractions of the pot after
+/// calling. All-in is always an option when raising is legal, even past
+/// `max_raises`; the opponent's real sizes are added to the tree as they
+/// happen, so these only shape the bot's own options and the future.
+#[derive(Clone, Debug)]
+pub struct LiveMenu {
+    /// The first bet of a street.
+    pub bets: Vec<f64>,
+    /// Every raise after it.
+    pub raises: Vec<f64>,
+    /// Bets + raises per street before only all-in is left.
+    pub max_raises: u32,
+}
+
+impl LiveMenu {
+    /// A river solve: ¼ to 1½ pot, raises of a pot.
+    pub fn river() -> LiveMenu {
+        LiveMenu { bets: vec![0.25, 0.5, 0.75, 1.0, 1.5], raises: vec![1.0], max_raises: 3 }
+    }
+
+    /// The turn of a turn solve.
+    pub fn turn() -> LiveMenu {
+        LiveMenu { bets: vec![0.33, 0.66, 1.0, 1.5], raises: vec![1.0], max_raises: 3 }
+    }
+
+    /// The river inside a turn solve (48 copies of it, so lean).
+    pub fn river_in_turn() -> LiveMenu {
+        LiveMenu { bets: vec![0.5, 1.0], raises: vec![], max_raises: 2 }
+    }
+}

@@ -26,6 +26,8 @@ use hu_core::rules::{Action, ActionType, Legal, Phase, State, Street};
 
 use crate::abs::Abstraction;
 use crate::game::{Act, MAX_ACTIONS, TERMINAL};
+use crate::live::showdown::{holes, H};
+use crate::live::{Cache, LiveCfg, LiveDebug, LiveMode};
 use crate::strategy::Strategy;
 
 /// One betting action of the hand so far.
@@ -79,6 +81,8 @@ pub struct Debug {
     pub chosen: String,
     /// Why the equity heuristic was used, if it was.
     pub fallback: Option<String>,
+    /// Set when the decision was solved live.
+    pub live: Option<LiveDebug>,
 }
 
 pub struct Decision {
@@ -90,6 +94,11 @@ pub struct Engine {
     pub abs: Abstraction,
     /// Sorted by stack.
     pub strategies: Vec<Strategy>,
+    /// Which streets `decide` solves live (`crate::live`).
+    pub live: LiveMode,
+    pub live_cfg: LiveCfg,
+    /// Live solves of recent hands.
+    pub cache: Cache,
 }
 
 /// Abstract player of a real seat: 0 = small blind / button, 1 = big blind.
@@ -142,6 +151,35 @@ fn deck_for(v: &View) -> Result<Vec<Card>, String> {
 
 /// The real state at the bot's decision, rebuilt by replaying the hand.
 pub fn replay(v: &View) -> Result<State, String> {
+    let mut s = replay_n(v, v.actions.len())?;
+    while s.phase == Phase::StreetComplete && s.community.len() < v.board.len() {
+        s.advance_street();
+    }
+    if s.phase != Phase::Betting || s.to_act < 0 || s.to_act as usize != v.bot {
+        return Err("it is not the bot's turn".into());
+    }
+    if s.community != v.board {
+        return Err("board mismatch".into());
+    }
+    Ok(s)
+}
+
+/// The state at the start of `street` (betting open), whose history is the
+/// hand's first `n` actions.
+pub fn state_at_street(v: &View, n: usize, street: Street) -> Result<State, String> {
+    let mut s = replay_n(v, n)?;
+    while s.phase == Phase::StreetComplete && s.street < street {
+        s.advance_street();
+    }
+    if s.street != street || s.phase != Phase::Betting {
+        return Err(format!("no betting at the start of the {street:?}"));
+    }
+    Ok(s)
+}
+
+/// The state after the hand's first `n` actions, each checked to replay
+/// exactly as recorded.
+fn replay_n(v: &View, n: usize) -> Result<State, String> {
     if v.bot > 1 || v.button > 1 {
         return Err("seats are 0 and 1".into());
     }
@@ -154,7 +192,7 @@ pub fn replay(v: &View) -> Result<State, String> {
     if s.button as usize != v.button {
         return Err("button mismatch".into());
     }
-    for (i, a) in v.actions.iter().enumerate() {
+    for (i, a) in v.actions[..n].iter().enumerate() {
         while s.phase == Phase::StreetComplete {
             s.advance_street();
         }
@@ -170,15 +208,6 @@ pub fn replay(v: &View) -> Result<State, String> {
         if rec.kind != a.kind || rec.to != a.to {
             return Err(format!("action {i}: replayed as {:?} to {} (sent {:?} to {})", rec.kind, rec.to, a.kind, a.to));
         }
-    }
-    while s.phase == Phase::StreetComplete && s.community.len() < v.board.len() {
-        s.advance_street();
-    }
-    if s.phase != Phase::Betting || s.to_act < 0 || s.to_act as usize != v.bot {
-        return Err("it is not the bot's turn".into());
-    }
-    if s.community != v.board {
-        return Err("board mismatch".into());
     }
     Ok(s)
 }
@@ -318,8 +347,17 @@ impl Engine {
             .expect("no strategies loaded")
     }
 
+    /// The bot's decision, with live solving per `self.live`.
     pub fn decide(&self, v: &View, rng: &mut SmallRng) -> Result<Decision, String> {
+        self.decide_mode(v, rng, self.live)
+    }
+
+    /// The bot's decision with the given live-solving mode.
+    pub fn decide_mode(&self, v: &View, rng: &mut SmallRng, mode: LiveMode) -> Result<Decision, String> {
         let s = replay(v)?;
+        if mode.covers(s.street) {
+            return crate::live::decide(self, v, &s, mode, rng);
+        }
         let eff = v.stacks[0].min(v.stacks[1]);
         let strat = self.pick(eff);
         let tree = &strat.tree;
@@ -439,7 +477,48 @@ impl Engine {
         if strategies.is_empty() {
             return Err(std::io::Error::other("no strategies"));
         }
-        Ok(Engine { abs, strategies })
+        Ok(Engine { abs, strategies, live: LiveMode::Off, live_cfg: LiveCfg::default(), cache: Cache::new(256) })
+    }
+
+    /// Each seat's range after the hand's first `upto` actions as the table
+    /// would have played them: per hand (`holes()` order), the product of
+    /// the table's probabilities of each of that seat's actions, along the
+    /// same translated history walk `decide` does. Stops (leaving the rest
+    /// uninformative) where the real hand leaves the abstract tree. Hands
+    /// that clash with the board are not zeroed here.
+    pub fn table_ranges(&self, v: &View, actions: &[hu_core::rules::HandAction], upto: usize) -> [Vec<f32>; 2] {
+        let strat = self.pick(v.stacks[0].min(v.stacks[1]));
+        let tree = &strat.tree;
+        let hs = holes();
+        let mut r = [vec![1f32; H], vec![1f32; H]];
+        let mut node = 0u32;
+        let mut p = [0f64; MAX_ACTIONS];
+        for (i, ha) in actions[..upto].iter().enumerate() {
+            let nd = &tree.nodes[node as usize];
+            if nd.player == TERMINAL || nd.player as usize != abs_player(ha.seat, v.button) || nd.street as usize != ha.street.index() {
+                break;
+            }
+            let acts = tree.actions(nd);
+            let mut trng = SmallRng::seed_from_u64(hand_seed(v.seed, i));
+            let k = translate(acts, ha, &mut trng);
+            let st = ha.street.index();
+            let board = &v.board[..[0, 3, 4, 5][st]];
+            let n = nd.n as usize;
+            for (h, w) in r[ha.seat].iter_mut().enumerate() {
+                if *w == 0.0 {
+                    continue;
+                }
+                let [a, b] = hs[h];
+                if board.contains(&a) || board.contains(&b) {
+                    *w = 0.0;
+                    continue;
+                }
+                strat.probs(node, self.abs.bucket(st, [a, b], board), &mut p[..n]);
+                *w *= p[k] as f32;
+            }
+            node = tree.children(nd)[k];
+        }
+        r
     }
 }
 

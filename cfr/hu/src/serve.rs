@@ -22,7 +22,7 @@ use hu_cfr::engine::{cards_str, Debug, Engine, HistAction, View};
 use hu_core::cards::parse;
 use hu_core::rules::ActionType;
 
-use crate::play::load_engine;
+use crate::play::{live_flags, load_engine};
 use crate::util::{flag, hu_home, log, num};
 
 /// The bot's view of the hand, as the web app sends it.
@@ -102,8 +102,14 @@ fn bad(msg: String) -> Err {
 
 async fn act(State(engine): State<Arc<Engine>>, Json(req): Json<ActRequest>) -> Result<Json<ActResponse>, Err> {
     let view = to_view(&req).map_err(bad)?;
-    let mut rng = SmallRng::from_entropy();
-    let d = engine.decide(&view, &mut rng).map_err(bad)?;
+    // Live solves take seconds: keep them off the async workers.
+    let (d, view) = tokio::task::spawn_blocking(move || {
+        let mut rng = SmallRng::from_entropy();
+        engine.decide(&view, &mut rng).map(|d| (d, view))
+    })
+    .await
+    .map_err(|e| bad(format!("engine task failed: {e}")))?
+    .map_err(bad)?;
     let (kind, amount) = match d.action.kind {
         ActionType::Fold => ("fold", None),
         ActionType::Check => ("check", None),
@@ -130,6 +136,9 @@ async fn act(State(engine): State<Arc<Engine>>, Json(req): Json<ActRequest>) -> 
 async fn health(State(engine): State<Arc<Engine>>) -> Json<Value> {
     Json(json!({
         "abstraction": engine.abs.meta.name,
+        "live": engine.live.name(),
+        "riverIters": engine.live_cfg.river_iters,
+        "turnIters": engine.live_cfg.turn_iters,
         "buckets": engine.abs.buckets(),
         "strategies": engine.strategies.iter().map(|s| json!({
             "stackBb": s.meta.stack / 2,
@@ -143,7 +152,10 @@ pub fn serve_cmd(args: &[String]) {
     let run = flag(args, "--run").expect("--run NAME");
     let port: u16 = num(args, "--port", 8790);
     let web = flag(args, "--web").map(Into::into).unwrap_or_else(|| hu_home().join("web"));
-    let engine = Arc::new(load_engine(&run));
+    let mut e = load_engine(&run);
+    live_flags(args, &mut e);
+    let live = e.live.name();
+    let engine = Arc::new(e);
     let app = Router::new()
         .route("/api/act", post(act))
         .route("/api/health", get(health))
@@ -152,7 +164,7 @@ pub fn serve_cmd(args: &[String]) {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("tokio runtime");
     rt.block_on(async move {
         let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await.expect("bind");
-        log(format!("serving run {run} on port {port} (web app from {})", web.display()));
+        log(format!("serving run {run} (live solving: {live}) on port {port} (web app from {})", web.display()));
         axum::serve(listener, app).await.expect("server");
     });
 }

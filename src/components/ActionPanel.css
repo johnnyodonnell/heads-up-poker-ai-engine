@@ -147,3 +147,18 @@
   --chip-spot: #f7c23d;
   --chip-text: #fff;
 }
+
+/* While the bot's move is being worked out on the box. */
+.action-thinking {
+  color: #c9ccd3;
+  font-size: 24px;
+  font-style: italic;
+  padding: 18px 8px;
+  animation: action-thinking-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes action-thinking-pulse {
+  50% {
+    opacity: 0.45;
+  }
+}

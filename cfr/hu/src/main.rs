@@ -10,10 +10,14 @@
 //!       build the hand-group tables into $HU_HOME/data/NAME/
 //!   train --run NAME --abs ABS --stack 200 --iters 1e9   train one stack depth (resumable)
 //!   export --run NAME --abs ABS --stack 200              export from the latest checkpoint
-//!   eval --run NAME [--vs all|bot,...|run:OTHER] [--deals 20000] [--stacks full|sampled]
+//!   eval --run NAME [--vs all|bot,...|run:OTHER] [--deals 20000] [--stacks full|sampled|200bb]
 //!   probe --run NAME [--stack 200]                       preflop charts
+//!   livebench --run NAME [--street river|turn] [--iters 100,200,400]  time live solves
 //!   serve --run NAME [--port 8790] [--web DIR]           the engine over HTTP + the web app
 //!   slumbot --run NAME [--hands 1000] [--sessions 1]     play Slumbot through its public API
+//!
+//! eval, serve, slumbot and livebench take --live off|river|turn (solve those
+//! streets live; default off) and --river-iters / --turn-iters.
 
 mod play;
 mod serve;
@@ -162,10 +166,11 @@ fn main() {
         Some("export") => train::export_cmd(&args),
         Some("eval") => play::eval_cmd(&args),
         Some("probe") => play::probe_cmd(&args),
+        Some("livebench") => play::livebench_cmd(&args),
         Some("serve") => serve::serve_cmd(&args),
         Some("slumbot") => slumbot::slumbot_cmd(&args),
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | probe | serve | slumbot");
+            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | probe | livebench | serve | slumbot");
             std::process::exit(2);
         }
     }
