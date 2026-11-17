@@ -89,7 +89,15 @@ pub struct LiveCfg {
 
 impl Default for LiveCfg {
     fn default() -> LiveCfg {
-        LiveCfg { river_iters: 400, turn_iters: 200, parallel: true, opp_floor: 0.0, turn_menu: LiveMenu::turn() }
+        LiveCfg {
+            river_iters: 400,
+            // ~2 s on the box with the medium turn menu, ~4% of the pot
+            // from equilibrium on real 200bb spots (`hu livebench`).
+            turn_iters: 150,
+            parallel: true,
+            opp_floor: 0.0,
+            turn_menu: LiveMenu::turn_by_name("medium").unwrap(),
+        }
     }
 }
 
@@ -123,7 +131,35 @@ pub struct Solved {
 }
 
 type HandKey = (u64, usize);
-type SolveKey = (usize, usize, usize); // (live mode, street index, real actions on the street)
+/// (live mode, street, real actions on the street, hash of everything the
+/// solve depends on). The hash makes the cache content-addressed: hands
+/// that share a seed (e.g. the same deals replayed against another
+/// opponent) never reuse each other's solves.
+type SolveKey = (usize, usize, usize, u64);
+
+/// FNV-1a over the stacks, button, bot, board up to `street` and the
+/// actions up to `upto`.
+fn solve_hash(v: &View, street: Street, upto: usize) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    let mut eat = |x: u64| {
+        for b in x.to_le_bytes() {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(v.stacks[0] as u64);
+    eat(v.stacks[1] as u64);
+    eat(v.button as u64);
+    eat(v.bot as u64);
+    for &c in &v.board[..board_len(street)] {
+        eat(c as u64);
+    }
+    for a in &v.actions[..upto] {
+        eat(a.seat as u64);
+        eat(a.kind as u64);
+        eat(a.to as u64);
+    }
+    h
+}
 
 /// Recent hands' solves, so later decisions in a hand reuse them.
 pub struct Cache {
@@ -221,30 +257,37 @@ fn street_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, 
 /// The solve of `street` with its first `n` real actions taken (cached).
 #[allow(clippy::too_many_arguments)]
 fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: Street, n: usize, st: &mut Stats) -> Result<Arc<Solved>, String> {
-    let sk = (mode as usize, street.index(), n);
+    let k = street_start(&s.actions, street);
+    let sk = (mode as usize, street.index(), n, solve_hash(v, street, k + n));
     if let Some(x) = e.cache.get(key, sk) {
         return Ok(x);
     }
-    let k = street_start(&s.actions, street);
     let forced: Vec<HistAction> = v.actions[k..k + n].to_vec();
     let start = state_at_street(v, k, street)?;
     let ranges = street_ranges(e, v, s, mode, key, street, st)?;
     // The bot's own earlier actions on this street, frozen.
     let mut frozen: Vec<(usize, Vec<f32>)> = Vec::new();
+    let mut prev_recs: Vec<Vec<(hu_core::rules::ActionType, i32)>> = Vec::new();
     for (j, a) in forced.iter().enumerate() {
         if a.seat == v.bot {
             let prev = solve(e, v, s, mode, key, street, j, st)?;
             let node = prev.g.path[j];
             frozen.push((j, prev.strat.get(&node).ok_or("no strategy at an earlier decision")?.clone()));
+            prev_recs.push(prev.g.records(&prev.g.nodes[node as usize]).to_vec());
         }
     }
     let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
     let g = subgame::build(&start, &forced, &menu, &LiveMenu::river_in_turn())?;
     let mut fz = Vec::with_capacity(frozen.len());
-    for (j, sg) in frozen {
+    for (i, (j, sg)) in frozen.into_iter().enumerate() {
         let node = g.path[j];
         if g.nodes[node as usize].n as usize * H != sg.len() {
-            return Err(format!("the bot's decision {j} on this street has a different set of options than when it was made"));
+            return Err(format!(
+                "the bot's decision {j} on this street has a different set of options than when it was made: {:?} then, {:?} now (real actions {:?})",
+                prev_recs[i],
+                g.records(&g.nodes[node as usize]),
+                forced.iter().map(|a| (a.seat, a.kind, a.to)).collect::<Vec<_>>()
+            ));
         }
         fz.push((node, sg));
     }
