@@ -83,6 +83,17 @@ pub struct LiveCfg {
     /// model says it would never play this way, for opponents who don't
     /// play like our model.
     pub opp_floor: f32,
+    /// Share of the opponent's range at each solved street's start that is
+    /// "any hand" (uniform over the hands the board allows); the rest is
+    /// the estimated range. Hedges against opponents who don't play like
+    /// our model, whose estimated ranges come out far too narrow.
+    pub opp_mix: f32,
+    /// Least probability with which every opponent hand takes each action
+    /// the opponent really took on the street being solved (0 = leave it
+    /// to the solve). Without it the solve assumes only the hands that
+    /// "should" take a line took it, and against opponents who bet and
+    /// raise with anything the bot folds far too much.
+    pub opp_line: f32,
     /// The turn's menu in turn solves.
     pub turn_menu: LiveMenu,
 }
@@ -96,6 +107,8 @@ impl Default for LiveCfg {
             turn_iters: 150,
             parallel: true,
             opp_floor: 0.0,
+            opp_mix: 0.0,
+            opp_line: 0.0,
             turn_menu: LiveMenu::turn_by_name("medium").unwrap(),
         }
     }
@@ -211,8 +224,31 @@ fn street_start(actions: &[HandAction], street: Street) -> usize {
     actions.iter().position(|a| a.street == street).unwrap_or(actions.len())
 }
 
-/// Ranges at the start of `street`, per seat, board hands zeroed.
+/// Ranges at the start of `street`, per seat, board hands zeroed, the
+/// opponent's mixed with "any hand" per `opp_mix`.
 fn street_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: Street, st: &mut Stats) -> Result<[Vec<f32>; 2], String> {
+    let mut r = estimated_ranges(e, v, s, mode, key, street, st)?;
+    let mix = e.live_cfg.opp_mix;
+    if mix > 0.0 {
+        let board = &v.board[..board_len(street)];
+        let mut any = vec![1f32; H];
+        mask(&mut any, board);
+        let opp = &mut r[1 - v.bot];
+        let total: f32 = opp.iter().sum();
+        let valid: f32 = any.iter().sum();
+        if total > 0.0 {
+            for (x, u) in opp.iter_mut().zip(&any) {
+                *x = (1.0 - mix) * *x / total * valid + mix * u;
+            }
+        } else {
+            *opp = any;
+        }
+    }
+    Ok(r)
+}
+
+/// The ranges before mixing.
+fn estimated_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: Street, st: &mut Stats) -> Result<[Vec<f32>; 2], String> {
     let k = street_start(&s.actions, street);
     let board = &v.board[..board_len(street)];
     if street == Street::River && mode.covers(Street::Turn) {
@@ -252,6 +288,18 @@ fn street_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, 
         mask(x, board);
     }
     Ok(r)
+}
+
+/// Floor the opponent's real actions on the street (`LiveCfg::opp_line`).
+fn floor_opponent_line(sv: &mut Solver, g: &Subgame, forced: &[HistAction], bot: usize, p: f32) {
+    if p <= 0.0 {
+        return;
+    }
+    for (j, a) in forced.iter().enumerate() {
+        if a.seat != bot {
+            sv.floor(g.path[j], g.path_edges[j] as usize, p);
+        }
+    }
 }
 
 /// The solve of `street` with its first `n` real actions taken (cached).
@@ -296,6 +344,7 @@ fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: 
     let board = &v.board[..board_len(street)];
     let (strat, ranges, exploitability) = {
         let mut sv = Solver::new(&g, board, ranges, fz, e.live_cfg.parallel);
+        floor_opponent_line(&mut sv, &g, &forced, v.bot, e.live_cfg.opp_line);
         sv.run(iters);
         let x = sv.exploitability();
         let mut strat = HashMap::new();
@@ -411,6 +460,7 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
     let fz = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
     let t0 = Instant::now();
     let mut sv = Solver::new(&g, &v.board[..board_len(street)], ranges, fz, e.live_cfg.parallel);
+    floor_opponent_line(&mut sv, &g, &v.actions[k..k + n], v.bot, e.live_cfg.opp_line);
     sv.run(iters);
     let ms = t0.elapsed().as_millis() as u64;
     let x = sv.exploitability();

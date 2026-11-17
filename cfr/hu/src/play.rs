@@ -10,7 +10,10 @@
 //!       to equilibrium they get
 //!
 //! Live flags (eval, serve, slumbot, livebench): --live off|river|turn,
-//! --river-iters N, --turn-iters N, --turn-menu full|medium|lean, --opp-floor F (least likelihood of an
+//! --river-iters N, --turn-iters N, --turn-menu full|medium|lean, --opp-floor F,
+//! --opp-mix F (share of "any hand" in the opponent's estimated range),
+//! --opp-line F (least probability of every opponent hand taking the
+//! opponent's real actions on the solved street) (least likelihood of an
 //! opponent action when estimating its range). `run:OTHER` rivals always play their
 //! table only (`run:NAME` with the same run: the run without live solving).
 
@@ -71,6 +74,12 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
     e.live_cfg.turn_iters = num(args, "--turn-iters", e.live_cfg.turn_iters);
     if let Some(m) = flag(args, "--turn-menu") {
         e.live_cfg.turn_menu = hu_cfr::menu::LiveMenu::turn_by_name(&m).unwrap_or_else(|| panic!("--turn-menu full|medium|lean, not {m}"));
+    }
+    if let Some(f) = flag(args, "--opp-line") {
+        e.live_cfg.opp_line = f.parse().expect("--opp-line 0..1");
+    }
+    if let Some(f) = flag(args, "--opp-mix") {
+        e.live_cfg.opp_mix = f.parse().expect("--opp-mix 0..1");
     }
     if let Some(f) = flag(args, "--opp-floor") {
         e.live_cfg.opp_floor = f.parse().expect("--opp-floor 0..1");

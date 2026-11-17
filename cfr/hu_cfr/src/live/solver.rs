@@ -15,7 +15,10 @@
 //! Results are summed in a fixed order, so they don't depend on threading.
 //!
 //! Nodes can be frozen to a given strategy (the bot's own earlier actions on
-//! this street keep the strategy it actually played).
+//! this street keep the strategy it actually played), and an action can be
+//! floored: every hand takes it at least that often (the opponent's real
+//! actions this street, so the bot never assumes only a few hands take a
+//! line the opponent actually took).
 
 use rayon::prelude::*;
 
@@ -62,6 +65,7 @@ struct Ctx<'a> {
     boards: &'a [Board],
     off: &'a [usize],
     frozen: &'a [Option<Vec<f32>>],
+    floors: &'a [Option<(usize, f32)>],
     mode: Mode,
     disc: Disc,
 }
@@ -85,6 +89,8 @@ pub struct Solver<'a> {
     /// `river[i * cards + c]`: chance node i's river with card c.
     river: Vec<Arena>,
     frozen: Vec<Option<Vec<f32>>>,
+    /// Per node: (edge, least probability of that edge for every hand).
+    floors: Vec<Option<(usize, f32)>>,
     /// Reach of each hand at the root, per seat.
     pub ranges: [Vec<f32>; 2],
     pub iterations: u32,
@@ -155,6 +161,7 @@ impl<'a> Solver<'a> {
             fz[node as usize] = Some(s);
         }
         Solver {
+            floors: vec![None; nn],
             g,
             boards,
             cards,
@@ -171,6 +178,11 @@ impl<'a> Solver<'a> {
         }
     }
 
+    /// Make every hand take `edge` at `node` with at least probability `p`.
+    pub fn floor(&mut self, node: u32, edge: usize, p: f32) {
+        self.floors[node as usize] = Some((edge, p));
+    }
+
     /// Floats of solver state (regrets and strategy sums).
     pub fn size(&self) -> usize {
         2 * (self.main.regret.len() + self.river.iter().map(|a| a.regret.len()).sum::<usize>())
@@ -178,7 +190,7 @@ impl<'a> Solver<'a> {
 
     fn walk_root(&mut self, p: usize, mode: Mode, disc: Disc) -> Vec<f32> {
         if self.cards.is_empty() {
-            let cx = Ctx { g: self.g, boards: &self.boards, off: &self.off, frozen: &self.frozen, mode, disc };
+            let cx = Ctx { g: self.g, boards: &self.boards, off: &self.off, frozen: &self.frozen, floors: &self.floors, mode, disc };
             walk(&cx, &mut self.main, 0, p, &self.ranges[p], &self.ranges[1 - p], 0)
         } else {
             self.turn_pass(p, mode, disc)
@@ -215,6 +227,9 @@ impl<'a> Solver<'a> {
                 (None, Mode::Train) => regret_match(&self.main.regret[off..off + n * H], n, &mut sigma),
                 (None, Mode::Best) => normalize(&self.main.sum[off..off + n * H], n, &mut sigma),
             }
+            if let Some((edge, p)) = self.floors[i] {
+                apply_floor(&mut sigma, n, edge, p);
+            }
             let (rpi, roi) = (rp[i].clone().unwrap(), ro[i].clone().unwrap());
             for (a, &k) in g.children(nd).iter().enumerate() {
                 let s = &sigma[a * H..(a + 1) * H];
@@ -237,7 +252,7 @@ impl<'a> Solver<'a> {
 
         // 2. Every live (chance node, card) river, in parallel.
         let nc = self.cards.len();
-        let cx = Ctx { g, boards: &self.boards, off: &self.off, frozen: &self.frozen, mode, disc };
+        let cx = Ctx { g, boards: &self.boards, off: &self.off, frozen: &self.frozen, floors: &self.floors, mode, disc };
         let (chances, cards, rp_ref, ro_ref, dead_ref) = (&self.chances, &self.cards, &rp, &ro, &dead);
         let task = |idx: usize, ar: &mut Arena| -> Option<Vec<f32>> {
             let ch = chances[idx / nc];
@@ -357,6 +372,22 @@ impl<'a> Solver<'a> {
             total / pairs / 2.0
         } else {
             0.0
+        }
+    }
+}
+
+/// Raise `edge` to at least `p` for every hand, scaling the other actions
+/// down to keep each hand's strategy summing to 1.
+fn apply_floor(sigma: &mut [f32], n: usize, edge: usize, p: f32) {
+    for h in 0..H {
+        let cur = sigma[edge * H + h];
+        if cur >= p {
+            continue;
+        }
+        let rest = 1.0 - cur;
+        let scale = if rest > 0.0 { (1.0 - p) / rest } else { 0.0 };
+        for a in 0..n {
+            sigma[a * H + h] = if a == edge { p } else { sigma[a * H + h] * scale };
         }
     }
 }
@@ -486,6 +517,9 @@ fn walk(cx: &Ctx, ar: &mut Arena, node: u32, p: usize, rp: &[f32], ro: &[f32], s
                 (Some(f), _) => sigma.copy_from_slice(f),
                 (None, Mode::Train) => regret_match(&ar.regret[off..off + n * H], n, &mut sigma),
                 (None, Mode::Best) => normalize(&ar.sum[off..off + n * H], n, &mut sigma),
+            }
+            if let Some((edge, fp)) = cx.floors[node as usize] {
+                apply_floor(&mut sigma, n, edge, fp);
             }
             if q as usize == p {
                 let mut cv: Vec<Vec<f32>> = Vec::with_capacity(n);
