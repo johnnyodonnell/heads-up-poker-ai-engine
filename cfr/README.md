@@ -71,6 +71,65 @@ The service (port 8790) is started once with
 `pm2 start cfr/pm2.config.cjs && pm2 save` from `repo/`; `cfr/deploy_web.sh`
 updates the web app it serves. `GET /api/health` shows what's loaded.
 
+## Results
+
+All in bb/100 from the engine's side, ± a 95% interval.
+
+### Runs
+
+| Run | Abstraction (flop/turn/river groups) | Iterations at 100bb | Training time | Served |
+|---|---|---|---|---|
+| v1a (checkpoint A) | a200: 200/200/200 | 300M, 100bb only | 12 min | 2026-11-16 |
+| v1b (checkpoint B) | a2k: 2000/2000/1000 | 2B | 3.6 h | 2026-11-16 |
+| v1c (checkpoint C) | a10k: 10000/5000/2000 | 5B | 9.3 h | since 2026-11-17 |
+
+### Against the scripted bots
+
+`hu eval --run RUN --stacks sampled`: 40,000 hands per bot (20,000 deals
+played from both seats), stack depths sampled the way the app's freeze-out
+reaches them. Intervals are ±5 to ±24.
+
+| Bot | v1a | v1b | v1c |
+|---|---|---|---|
+| random (the app's original placeholder bot) | +135 | +150 | +145 |
+| station (always checks or calls) | +180 | +198 | +203 |
+| maniac (pot-size bet or raise whenever allowed) | +138 | +222 | +215 |
+| nit (premium hands only; continues with top pair or better) | +44 | +45 | +41 |
+| shover (all-in preflop with any two cards) | +96 | +112 | +91 |
+| minbet (min-bets and min-raises) | +315 | +369 | +370 |
+| overbet (bets or raises 3× pot) | −8 | +45 | +39 |
+
+### Head to head
+
+`hu eval --run v1c --vs run:v1b,run:v1a --deals 200000`: 400,000 hands.
+
+| Match | Sampled stacks | Full 100bb stacks |
+|---|---|---|
+| v1c vs v1b | +1.0 ± 2.6 | +3.9 ± 3.0 |
+| v1c vs v1a | +10.9 ± 2.6 | +7.8 ± 3.1 |
+
+### Against Slumbot
+
+`hu slumbot --run v1c --hands 10000 --sessions 2` (2026-11-17, 91 min).
+[Slumbot](https://slumbot.com) is a strong public research bot. It plays
+200bb stacks, deeper than v1c's deepest strategy (100bb), so v1c plays it
+with its 100bb strategy.
+
+| Measure | v1c, 10,000 hands |
+|---|---|
+| Won | **+8.6 ± 37.1** |
+| Won, minus what Slumbot wins with the same cards in the same seat | **+18.2 ± 32.5** |
+| On the button / in the big blind | +53.1 ± 52.5 / −35.9 ± 52.5 |
+| The 64 hands that went to full 200bb stacks | −2,000bb net (about −20 bb/100 overall) |
+| Fallback decisions | 53 of 28,655 (0.2%) |
+
+That is break-even with Slumbot within the noise. The clearest leak is in
+hands played for the full 200bb: the 100bb strategy's all-in is half the
+size of the real one, so the bot gets its whole stack in too easily. A
+strategy trained at 200bb (a new deepest depth) would target that; it does
+not affect the app, whose matches start at 100bb. Every hand is logged to
+`$HU_HOME/logs/slumbot-v1c.jsonl`.
+
 ## Saved runs
 
 Trained runs are too big for git (v1c is 7.2 GB of card abstraction, 1 GB

@@ -31,6 +31,15 @@ The **Debug** toggle (top left) shows the bot's cards face up and, for each of
 its decisions this hand, the strategy it used (stack depth), its hand group,
 the options it was choosing between with their probabilities, and its pick.
 
+## How strong is it?
+
+The current strategy (v1c) beats all seven scripted test bots by 39 to 370
+bb/100 and edges out the earlier checkpoints head to head. Against
+[Slumbot](https://slumbot.com), a strong public research bot, it is about
+break-even: **+8.6 ± 37.1 bb/100 over 10,000 hands**, played at Slumbot's
+200bb stacks, deeper than v1c was trained for. Details and every number are
+in [Results](cfr/README.md#results).
+
 ## The trained strategy
 
 The strategy the bot plays is too big for git (about 8 GB on disk), so it is
