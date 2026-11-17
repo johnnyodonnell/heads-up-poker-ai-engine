@@ -70,6 +70,23 @@ The service (port 8790) is started once with
 `pm2 start cfr/pm2.config.cjs && pm2 save` from `repo/`; `cfr/deploy_web.sh`
 updates the web app it serves. `GET /api/health` shows what's loaded.
 
+## Saved runs
+
+Trained runs are too big for git, so they live in GitHub Releases tagged
+`strategy-RUN`: the card abstraction and the strategy (all that serving
+needs, ~1.4 GB compressed for v1c), plus the solver checkpoints to resume
+training, with SHA-256 sums of every file.
+
+```sh
+# save (on the box): RUN, its abstraction, and the commit whose code reads them
+cfr/box_bg.sh release-v1c ./release_save.sh v1c a10k <commit-sha>
+# restore into $HU_HOME (on the box); add --checkpoints to resume training too
+cfr/box.sh ./release_restore.sh strategy-v1c
+cfr/box.sh 'echo v1c > $HU_HOME/current_run && pm2 restart hu-engine'
+```
+
+Released: `strategy-v1c` (checkpoint C, served since 2026-11-17).
+
 ## Parity with the TS game
 
 `game.ts` and `evaluator.ts` are the source of truth. The Rust port must
