@@ -502,6 +502,9 @@ pub fn diag_cmd(args: &[String]) {
         // where its range estimates should be right.
         use hu_core::rules::Status;
         let n: usize = n.parse().expect("--selfplay N");
+        // `--opp-run NAME`: seat 1 is another run's table, so the check
+        // says how far that run's play is from this run's model of it.
+        let other = flag(args, "--opp-run").map(|r| load_engine(&r));
         let mut sums: Vec<CalibSum> = (0..4).map(|_| CalibSum::default()).collect();
         let mut rng = SmallRng::seed_from_u64(7);
         for i in 0..n {
@@ -517,7 +520,8 @@ pub fn diag_cmd(args: &[String]) {
                     Phase::Betting => {
                         let seat = s.to_act as usize;
                         let v = hu_cfr::engine::view_of(&s, seat, [stack; 2], seed);
-                        let d = engine.decide_mode(&v, &mut rng, hu_cfr::live::LiveMode::Off).expect("decide");
+                        let who = if seat == 1 { other.as_ref().unwrap_or(&engine) } else { &engine };
+                        let d = who.decide_mode(&v, &mut rng, hu_cfr::live::LiveMode::Off).expect("decide");
                         s.apply(d.action);
                     }
                     Phase::StreetComplete if !hu_core::allin_ev::is_runout(&s) && s.players.iter().all(|p| p.status != Status::Folded) => s.advance_street(),
