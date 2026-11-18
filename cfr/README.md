@@ -248,8 +248,24 @@ solve plays an equilibrium against an opponent who can fold. Offering it a
 2½-pot bet changed nothing; winning more from these bots would take
 opponent modelling, which this engine doesn't do.
 
-Turn (live turn solves at 1.7 hands/s on the whole box, so fewer deals and
-wider intervals): running.
+Pooled over the four matches against v1b and v1a (both depths), safe live
+river gains +4.3 ± 3.2 bb/100 over the table; over all six, +4.9 ± 2.4.
+
+Turn (`--live turn`: the turn and the river solved live), safe live minus
+the table at 200bb. A turn solve deals all 48 river cards and takes ~2 s on
+the whole box, so a match plays ~1.6 hands/s and the samples are small:
+
+| Opponent | Deals | Table | Safe live turn − table |
+|---|---|---|---|
+| v1c | 8,000 | 0 | +2.0 ± 19.6 |
+| v1b | 8,000 | −9.7 | +21.1 ± 23.2 |
+| v1a | 8,000 | +14.6 | −14.4 ± 24.6 |
+| maniac | 2,000 | +833 | −107 ± 96 |
+| minbet | 2,000 | +1,180 | −430 ± 127 |
+
+No gain over the table shows at this size (+2.9 ± 13.0 pooled over the
+three tables), and the turn adds the river's gap against the bots that
+never fold. Live turn is not worth its 2 s per decision yet; live river is.
 
 ## Saved runs
 
