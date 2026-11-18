@@ -23,10 +23,12 @@ hu_cfr/           the engine:
   mccfr.rs          external-sampling MCCFR (Pluribus-style schedule)
   strategy.rs       exported strategies (1 byte per action)
   engine.rs         play time: replay, translation, action mapping
-  eval.rs, bots.rs  matches against scripted bots
+  eval.rs, bots.rs  matches against scripted bots (duplicate, paired deals)
+  live/             live solving: subgame tree, vectorized DCFR, showdowns,
+                    safe re-solving against the table's values
   pushfold.rs, toy.rs, br.rs   solver validation games and exact best response
-hu/               the `hu` command line (abstraction, train, export, eval, probe,
-                  serve, tree, pushfold)
+hu/               the `hu` command line (abstraction, train, export, eval, compare,
+                  probe, livebench, serve, slumbot, slumbot-diag, tree, pushfold)
 scripts/          TS run with tsx: rule scenario checks, parity fixture dumper
 fixtures/         parity fixtures dumped from the TS engine (gitignored)
 box_env.sh        environment for the box (sourced by everything below)
@@ -36,6 +38,7 @@ sync_to_box.sh    rsync this working tree to the box
 train_all.sh      train a run's stack depths one after another
 serve.sh, pm2.config.cjs   the engine service under pm2
 deploy_web.sh     build the web app and copy it to the box
+panel.sh, panel_report.sh   the live-solving test panel and its paired results
 ```
 
 ## The box
@@ -129,6 +132,124 @@ size of the real one, so the bot gets its whole stack in too easily. A
 strategy trained at 200bb (a new deepest depth) would target that; it does
 not affect the app, whose matches start at 100bb. Every hand is logged to
 `$HU_HOME/logs/slumbot-v1c.jsonl`.
+
+## Live solving (v2)
+
+With `--live river` or `--live turn` (on `hu eval`, `serve`, `slumbot`), the
+engine solves turn and river decisions live instead of looking them up;
+preflop and the flop stay on the table. Off by default, and not served yet.
+
+How a live decision is made (`hu_cfr/src/live/`):
+
+- **The subgame** starts at the beginning of the current street with the
+  real pot and stacks. The street's real actions so far are in the tree at
+  their real sizes (off-menu sizes are added), so nothing is translated, and
+  every one of the 1,326 hands is exact (no hand groups). A turn solve deals
+  all 48 river cards. The bot's own earlier actions on the street are frozen
+  to the strategy it actually played.
+- **The solver** is Discounted CFR (α 1.5, β 0, γ 2), full-width and
+  vectorized over all hands of both players, with exact card removal. River
+  solves run 400 iterations (about 0.5 s), turn solves 150 (about 1.9 s on
+  the box, river cards in parallel). Solves are deterministic, and cached per
+  hand so later decisions reuse earlier ones.
+- **Ranges.** The bot's range is exact (its own strategy). The opponent's is
+  estimated from the table: how likely each hand was to play the hand this
+  way if the opponent played like our table.
+- **Safe re-solving** (default, `--safe best`). Trusting that estimate
+  failed against Slumbot (below): an opponent that doesn't play like our
+  table often holds hands the estimate rules out, and a re-solve is only an
+  equilibrium of the game it was given, so it can be badly beaten by those
+  hands. Safe solving gives every opponent hand the choice between playing
+  the solve and what it would get against the table from the start of the
+  street (`live/safe.rs`: the table's subtree walked over all hands against
+  the bot's exact range, the opponent best-responding). The solver learns
+  that choice per hand along with its own strategy, so no hand the opponent
+  could hold does better than it would against the table. The opponent's
+  root range is the estimate plus twice the hands that would beat their
+  table value (`--safe-weight 2`): pure Resolve (`--safe-weight resolve`)
+  stops learning when almost no hand wants to enter. `--safe off` is the
+  unsafe solver.
+
+Checking it:
+
+```sh
+cargo test --release -p hu_cfr live         # solver unit tests (below)
+hu livebench --run v1c --street turn --spots 20 --iters 150,300   # time and convergence on real spots
+hu livebench --run v1c --street river --spots 40 --iters 400 --check-safe   # safe vs unsafe solves
+hu slumbot-diag --run v1c --live river --log $HU_HOME/logs/slumbot-v1c-live-river.jsonl
+                                            # opponent ranges vs the hands Slumbot really held
+hu compare A.txt B.txt                      # paired difference of two saved matches
+./panel.sh; ./panel_report.sh               # the test panel (below) and its paired results
+```
+
+The unit tests check the solver against a polarized river toy with a known
+equilibrium, showdown and fold payoffs against brute force, convergence and
+determinism of river and turn solves, off-menu actions, and that safe
+solving holds hands an estimate left out to their alternatives while unsafe
+solving doesn't (0.34% vs 12.9% of the pot).
+
+### Why safe, and the Slumbot runs
+
+The first version was unsafe: it trusted the estimated opponent range.
+Against Slumbot (10,000 hands each, minus what Slumbot wins with the same
+cards, ± about 31) it did no better than the table: table +18.2, live river
++17.5, live turn −13.4. Slumbot shows its cards after every hand, so
+`hu slumbot-diag` could check the estimates against the hands it really
+held: they were badly overconfident, predicting those hands worse than
+"any hand" would (−2.8 nats per hand at the start of the river). The
+estimates are now hedged and fit to those logs (`LiveCfg`: +0.33 nats per
+hand, calibrated), and safe re-solving makes the solve hold up when the
+estimate is still wrong. Slumbot itself is too noisy to measure a few
+bb/100 in a day of play, so the engine is now tested against internal
+opponents, with Slumbot as a final check.
+
+### The test panel
+
+`panel.sh` plays the table, safe live and unsafe live (`--safe off`) against
+the earlier tables (v1c itself, v1b, v1a) and the scripted bots, at 200bb
+(Slumbot's depth) and 100bb. Every match is saved deal by deal, and the
+deals and the opponent's random draws depend only on the seed, so two
+variants are compared on identical deals (`hu compare`): only their
+decisions differ. Gates, set before the runs: safe live no worse than the
+table against any opponent, better against the other tables, and still
+beating every scripted bot by a wide margin.
+
+River, safe live minus the table on the same 50,000 duplicate deals
+(100,000 hands), bb/100:
+
+| Opponent | 200bb | 100bb |
+|---|---|---|
+| v1c (the table itself) | **+7.7 ± 6.0** | **+4.7 ± 3.9** |
+| v1b | +7.1 ± 7.8 | +3.8 ± 4.6 |
+| v1a | +5.9 ± 7.8 | +0.4 ± 4.4 |
+
+Unsafe live minus the table: +5.6, +2.3, +2.4 at 200bb and +3.8, +3.3,
+−0.4 at 100bb; safe was ahead of unsafe in all six.
+
+Against the scripted bots at 200bb (10,000 deals each), the table's result
+and safe live minus the table:
+
+| Bot | Table | Safe live − table |
+|---|---|---|
+| random | +377 | +63 ± 26 |
+| nit | +47 | +6 ± 8 |
+| maniac | +947 | −26 ± 25 |
+| station | +276 | −77 ± 28 |
+| minbet | +1,224 | −389 ± 48 |
+| shover, overbet | +384, +468 | 0 (the hands end before the river) |
+
+Live still beats every bot by a wide margin, but wins less than the table
+from the two that never fold. Traced decision by decision: the table bets
+its strongest river hands far bigger (2.2× the pot against station, raises
+of ~6× the pot over a min bet), because at 200bb it plays its 100bb strategy
+and its all-in is the whole 200bb. That pays against a bot that never folds,
+and is the same leak that lost on deep all-ins against Slumbot. The live
+solve plays an equilibrium against an opponent who can fold. Offering it a
+2½-pot bet changed nothing; winning more from these bots would take
+opponent modelling, which this engine doesn't do.
+
+Turn (live turn solves at 1.7 hands/s on the whole box, so fewer deals and
+wider intervals): running.
 
 ## Saved runs
 
