@@ -9,13 +9,17 @@
 //!       [--stack 400]   time live solves of real spots and measure how close
 //!       to equilibrium they get
 //!
-//! Live flags (eval, serve, slumbot, livebench): --live off|river|turn,
-//! --river-iters N, --turn-iters N, --turn-menu full|medium|lean, --opp-floor F,
-//! --opp-mix F (share of "any hand" in the opponent's estimated range),
-//! --opp-line F (least probability of every opponent hand taking the
-//! opponent's real actions on the solved street) (least likelihood of an
-//! opponent action when estimating its range). `run:OTHER` rivals always play their
-//! table only (`run:NAME` with the same run: the run without live solving).
+//! Live flags (eval, serve, slumbot, slumbot-diag, livebench): --live
+//! off|river|turn, --river-iters N, --turn-iters N, --turn-menu
+//! full|medium|lean, and the opponent-range hedges (defaults in
+//! `hu_cfr::live::LiveCfg`): --opp-floor F (least likelihood of an opponent
+//! action when estimating its range from the table), --opp-temper F
+//! (exponent on those likelihoods), --opp-sizes on|off (a bet's likelihood is
+//! betting at any size), --opp-mix F (share of "any hand" in the opponent's
+//! range at a solve's start), --opp-line F (least probability of every
+//! opponent hand taking the opponent's real actions on the solved street).
+//! `run:OTHER` rivals always play their table only (`run:NAME` with the same
+//! run: the run without live solving).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -83,6 +87,16 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
     }
     if let Some(f) = flag(args, "--opp-floor") {
         e.live_cfg.opp_floor = f.parse().expect("--opp-floor 0..1");
+    }
+    if let Some(f) = flag(args, "--opp-temper") {
+        e.live_cfg.opp_temper = f.parse().expect("--opp-temper 0..1");
+    }
+    if let Some(f) = flag(args, "--opp-sizes") {
+        e.live_cfg.opp_sizes = match f.as_str() {
+            "on" => true,
+            "off" => false,
+            x => panic!("--opp-sizes on|off, not {x}"),
+        };
     }
 }
 

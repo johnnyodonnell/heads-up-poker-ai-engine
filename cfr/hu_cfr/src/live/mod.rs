@@ -94,6 +94,15 @@ pub struct LiveCfg {
     /// "should" take a line took it, and against opponents who bet and
     /// raise with anything the bot folds far too much.
     pub opp_line: f32,
+    /// Estimate the opponent's range from how likely each hand is to bet or
+    /// raise at all, not at the abstract size its real size translates to
+    /// (the table splits its own betting range over sizes in ways that say
+    /// little about another player's sizes).
+    pub opp_sizes: bool,
+    /// Exponent on the likelihood of each opponent action when estimating
+    /// its range from the table (1 = trust it fully, smaller = trust it
+    /// less; after `opp_floor`).
+    pub opp_temper: f32,
     /// The turn's menu in turn solves.
     pub turn_menu: LiveMenu,
 }
@@ -106,9 +115,18 @@ impl Default for LiveCfg {
             // from equilibrium on real 200bb spots (`hu livebench`).
             turn_iters: 150,
             parallel: true,
-            opp_floor: 0.0,
-            opp_mix: 0.0,
-            opp_line: 0.0,
+            // The opponent hedges, fit so the ranges predict the hands
+            // Slumbot really held (it shows them after every hand) as well
+            // as possible and are calibrated: `hu slumbot-diag` on one 10k
+            // hand log, checked on another. Trusting the table fully
+            // predicted those hands worse than "any hand" (river start: -2.8
+            // nats/hand vs uniform; these: +0.33, and +0.5 after the
+            // opponent's river actions).
+            opp_floor: 0.02,
+            opp_mix: 0.1,
+            opp_line: 0.2,
+            opp_sizes: true,
+            opp_temper: 0.5,
             turn_menu: LiveMenu::turn_by_name("medium").unwrap(),
         }
     }
@@ -271,7 +289,10 @@ fn estimated_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKe
                 }
                 let edge = g.records(nd).iter().position(|x| *x == (a.kind, a.to)).ok_or("turn action not in the turn solve's tree")?;
                 let sg = prev.strat.get(&node).ok_or("no strategy at a turn node")?;
-                let floor = if a.seat == v.bot { 0.0 } else { e.live_cfg.opp_floor };
+                // The opponent's real turn actions get the floor its real
+                // actions get inside a solve (the last ones came after the
+                // solve, so it couldn't apply it).
+                let floor = if a.seat == v.bot { 0.0 } else { e.live_cfg.opp_line.max(e.live_cfg.opp_floor) };
                 for (h, w) in r[a.seat].iter_mut().enumerate() {
                     *w *= sg[edge * H + h].max(floor);
                 }
@@ -432,6 +453,68 @@ pub fn decide(e: &Engine, v: &View, s: &State, mode: LiveMode, rng: &mut SmallRn
         opp_range: solved.ranges[1 - v.bot].iter().map(|&x| x as f64).sum(),
     });
     Ok(Decision { action, debug: dbg })
+}
+
+/// What the solve behind the bot's current decision believes (diagnostics).
+pub struct Inspect {
+    pub street: Street,
+    pub exploitability_pct: f64,
+    /// The opponent's range at the street's start, and at the current node
+    /// (its actions this street weighted by the solve's strategy for them).
+    pub opp_start: Vec<f32>,
+    pub opp_now: Vec<f32>,
+    /// Per real action on the street: (seat, added to the tree because it
+    /// was off the menu, share of the actor's range there that the solve
+    /// has taking it).
+    pub actions: Vec<(usize, bool, f64)>,
+    /// The bot's options for its hand: (label, probability).
+    pub options: Vec<(String, f64)>,
+}
+
+/// The solve of the bot's current decision (through the cache, as `decide`
+/// runs it) and what it believes.
+pub fn inspect(e: &Engine, v: &View, mode: LiveMode) -> Result<Inspect, String> {
+    let s = crate::engine::replay(v)?;
+    let street = s.street;
+    if !mode.covers(street) {
+        return Err(format!("{street:?} is not solved live in mode {}", mode.name()));
+    }
+    let k = street_start(&s.actions, street);
+    let n = s.actions.len() - k;
+    let mut st = Stats::default();
+    let solved = solve(e, v, &s, mode, (v.seed, v.bot), street, n, &mut st)?;
+    let g = &solved.g;
+    let mut reach = solved.ranges.clone();
+    let mut actions = Vec::new();
+    for j in 0..n {
+        let node = g.path[j];
+        let edge = g.path_edges[j] as usize;
+        let Kind::Decision(q) = g.nodes[node as usize].kind else {
+            return Err("a real action at a non-decision node".into());
+        };
+        let q = q as usize;
+        let sg = solved.strat.get(&node).ok_or("no strategy on the path")?;
+        let total: f64 = reach[q].iter().map(|&x| x as f64).sum();
+        let took: f64 = reach[q].iter().enumerate().map(|(h, &x)| x as f64 * sg[edge * H + h] as f64).sum();
+        actions.push((q, g.path_inserted[j], if total > 0.0 { took / total } else { 0.0 }));
+        for (h, w) in reach[q].iter_mut().enumerate() {
+            *w *= sg[edge * H + h];
+        }
+    }
+    let node = g.current();
+    let nd = &g.nodes[node as usize];
+    let sg = solved.strat.get(&node).ok_or("no strategy at the current node")?;
+    let h = hand(v.hole);
+    let options = g.actions(nd).iter().enumerate().map(|(a, act)| (action_label(act), sg[a * H + h] as f64)).collect();
+    let opp = 1 - v.bot;
+    Ok(Inspect {
+        street,
+        exploitability_pct: solved.exploitability / g.pot.max(1) as f64 * 100.0,
+        opp_start: solved.ranges[opp].clone(),
+        opp_now: reach[opp].clone(),
+        actions,
+        options,
+    })
 }
 
 /// One solve of the bot's current decision with `iters` iterations, outside

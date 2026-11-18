@@ -51,6 +51,8 @@ pub struct Subgame {
     pub path: Vec<u32>,
     /// The edge (0..n) each real action took at `path[i]`.
     pub path_edges: Vec<u32>,
+    /// Whether real action `i` was off the menu (added to the tree).
+    pub path_inserted: Vec<bool>,
     /// Pot at the root (both seats' contributions).
     pub pot: i32,
 }
@@ -105,6 +107,7 @@ pub fn build(start: &State, forced: &[HistAction], menu: &LiveMenu, river_menu: 
             street: start.street,
             path: vec![u32::MAX; forced.len() + 1],
             path_edges: vec![u32::MAX; forced.len()],
+            path_inserted: vec![false; forced.len()],
             pot,
         },
         forced,
@@ -207,6 +210,7 @@ impl Builder<'_> {
                     } else {
                         items.push((a, (f.kind, f.to), s2));
                         path_edge = Some(items.len() - 1);
+                        self.g.path_inserted[d] = true;
                     }
                 }
                 if let Some(k) = path_edge {

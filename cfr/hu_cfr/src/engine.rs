@@ -505,7 +505,17 @@ impl Engine {
             let st = ha.street.index();
             let board = &v.board[..[0, 3, 4, 5][st]];
             let n = nd.n as usize;
-            let floor = if ha.seat == v.bot { 0.0 } else { self.live_cfg.opp_floor };
+            let opp = ha.seat != v.bot;
+            let floor = if opp { self.live_cfg.opp_floor } else { 0.0 };
+            // The abstract actions whose probabilities make the likelihood:
+            // the translated one, or (opp_sizes) every bet/raise for a
+            // bet/raise.
+            let aggressive = |a: &Act| matches!(a, Act::Bet { .. } | Act::Raise { .. } | Act::AllIn { .. });
+            let take: Vec<usize> = if opp && self.live_cfg.opp_sizes && aggressive(&acts[k]) {
+                (0..n).filter(|&a| aggressive(&acts[a])).collect()
+            } else {
+                vec![k]
+            };
             for (h, w) in r[ha.seat].iter_mut().enumerate() {
                 if *w == 0.0 {
                     continue;
@@ -516,7 +526,8 @@ impl Engine {
                     continue;
                 }
                 strat.probs(node, self.abs.bucket(st, [a, b], board), &mut p[..n]);
-                *w *= (p[k] as f32).max(floor);
+                let like = (take.iter().map(|&a| p[a]).sum::<f64>() as f32).max(floor);
+                *w *= if opp && self.live_cfg.opp_temper != 1.0 { like.powf(self.live_cfg.opp_temper) } else { like };
             }
             node = tree.children(nd)[k];
         }

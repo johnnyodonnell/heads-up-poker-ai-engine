@@ -65,6 +65,7 @@ fn polarized_river_reaches_the_known_equilibrium() {
         street: Street::River,
         path: vec![0],
         path_edges: vec![],
+        path_inserted: vec![],
         pot: 20,
     };
     let board = ["Kh", "Qd", "7c", "4s", "2h"].map(card);
@@ -134,11 +135,13 @@ fn real_off_menu_actions_are_inserted() {
     assert_eq!(g.path.len(), 2);
     let root = &g.nodes[g.path[0] as usize];
     assert_eq!(g.records(root)[g.path_edges[0] as usize], (ActionType::Bet, 5));
+    assert!(g.path_inserted[0]);
     assert_eq!(g.nodes[g.current() as usize].kind, Kind::Decision((1 - first) as u8));
     // An on-menu action is matched, not duplicated.
     let forced = [HistAction { seat: first, kind: ActionType::Bet, to: 4 }];
     let g2 = subgame::build(&s, &forced, &LiveMenu::river(), &LiveMenu::river_in_turn()).unwrap();
     assert_eq!(g2.nodes[0].n + 1, g.nodes[0].n);
+    assert!(!g2.path_inserted[0]);
 }
 
 #[test]
