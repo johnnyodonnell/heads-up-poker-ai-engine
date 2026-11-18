@@ -2,7 +2,9 @@
 //! `hu livebench`.
 //!
 //!   hu eval --run NAME [--vs all|station,maniac,...|run:OTHER] [--deals 20000]
-//!       [--stacks full|sampled|200bb] [live flags]
+//!       [--stacks full|sampled|200bb] [--seed 1] [--save DIR [--tag NAME]] [live flags]
+//!   hu compare BASE.txt OTHER.txt ...   paired differences between saved
+//!       matches against the same opponent (same seed, deals, stacks)
 //!   hu probe --run NAME [--stack 200]   preflop charts: the small blind's first
 //!       action and the big blind facing a 2.5bb open
 //!   hu livebench --run NAME [--street river|turn] [--spots 20] [--iters 100,200,400]
@@ -112,6 +114,32 @@ fn parse_stacks(s: Option<&str>) -> Stacks {
     }
 }
 
+fn stacks_name(s: Stacks) -> String {
+    match s {
+        Stacks::Full => "100bb".into(),
+        Stacks::Sampled => "sampled".into(),
+        Stacks::Fixed(c) => format!("{}bb", c / 2),
+    }
+}
+
+/// `hu compare A.txt B.txt ...`: paired differences between saved matches
+/// (`hu eval --save`) against the same opponent with the same seed, deals
+/// and stacks: each file after the first minus the first, deal by deal.
+pub fn compare_cmd(args: &[String]) {
+    let files: Vec<&String> = args.iter().skip(2).filter(|a| !a.starts_with("--")).collect();
+    assert!(files.len() >= 2, "hu compare BASE.txt OTHER.txt ...");
+    let read = |p: &str| -> Vec<f64> { std::fs::read_to_string(p).unwrap_or_else(|e| panic!("{p}: {e}")).lines().map(|l| l.parse().expect("number")).collect() };
+    let base = read(files[0]);
+    let (m, c) = hu_cfr::eval::summarize(&base);
+    println!("{:70} {m:+8.1} ± {c:5.1} bb/100", files[0]);
+    for f in &files[1..] {
+        let x = read(f);
+        let (m, c) = hu_cfr::eval::summarize(&x);
+        let (d, dc) = hu_cfr::eval::compare(&x, &base);
+        println!("{:70} {m:+8.1} ± {c:5.1} bb/100   minus base: {d:+7.2} ± {dc:5.2}", f);
+    }
+}
+
 pub fn eval_cmd(args: &[String]) {
     let run = flag(args, "--run").expect("--run NAME");
     let deals: usize = num(args, "--deals", 20_000);
@@ -138,6 +166,15 @@ pub fn eval_cmd(args: &[String]) {
             (None, None) => panic!("unknown bot {name}"),
         };
         let r = play_match(&me, &opp, deals, stacks, seed);
+        if let Some(dir) = flag(args, "--save") {
+            // Per-deal results, for `hu compare` against another player's
+            // match with the same opponent, seed, deals and stacks.
+            let tag = flag(args, "--tag").unwrap_or_else(|| label.replace([' ', '(', ')'], ""));
+            let path = std::path::Path::new(&dir).join(format!("{tag}--vs-{}--{}-{}-{seed}.txt", name.replace(':', "_"), stacks_name(stacks), deals));
+            std::fs::create_dir_all(&dir).expect("create --save dir");
+            let text: String = r.per_deal.iter().map(|x| format!("{x}\n")).collect();
+            std::fs::write(&path, text).expect("write per-deal results");
+        }
         log(format!(
             "{label} vs {name:<8} {:+8.1} ± {:5.1} bb/100  ({} hands, {:?} stacks, {} decisions, {} fallbacks, {:.1}s)",
             r.bb100,

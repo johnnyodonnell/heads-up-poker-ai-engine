@@ -3,9 +3,17 @@
 //!
 //! Duplicate format: every deal (stacks, button, deck) is played twice with
 //! the players' seats swapped, so both see the same cards from both sides.
-//! Once no more decisions are possible, the board's remaining luck is
-//! replaced by its expectation (all-in EV). Result: player A's bb/100 with a
-//! 95% confidence interval from the per-deal variance.
+//! Both plays of a deal also use the same random draws, so two players that
+//! decide alike play the two hands identically and their luck cancels within
+//! the deal; only the decisions where they differ leave a trace. Once no
+//! more decisions are possible, the board's remaining luck is replaced by
+//! its expectation (all-in EV). Result: player A's bb/100 with a 95%
+//! confidence interval from the per-deal variance.
+//!
+//! Deals and draws depend only on the seed and the deal's index, so matches
+//! of different players against the same opponent with the same seed are
+//! paired deal by deal (`compare`): the opponent sees the same cards and
+//! makes the same random choices until the two players' decisions differ.
 
 use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 
@@ -47,6 +55,25 @@ pub struct MatchResult {
     /// Engine decisions, and how many used the equity fallback.
     pub decisions: usize,
     pub fallbacks: usize,
+    /// Player A's result per deal, in chips (mean of the two plays).
+    pub per_deal: Vec<f64>,
+}
+
+/// Mean and 95% interval (bb/100) of per-deal chip results.
+pub fn summarize(per_deal: &[f64]) -> (f64, f64) {
+    let n = per_deal.len() as f64;
+    let mean = per_deal.iter().sum::<f64>() / n;
+    let var = per_deal.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
+    let to_bb100 = 100.0 / BIG_BLIND as f64;
+    (mean * to_bb100, 1.96 * (var / n).sqrt() * to_bb100)
+}
+
+/// A − B per deal, for two matches with the same seed and deal count
+/// (paired: same deals, same draws): mean and 95% interval in bb/100.
+pub fn compare(a: &[f64], b: &[f64]) -> (f64, f64) {
+    assert_eq!(a.len(), b.len(), "paired matches need the same deals");
+    let d: Vec<f64> = a.iter().zip(b).map(|(x, y)| x - y).collect();
+    summarize(&d)
 }
 
 struct Counters {
@@ -108,23 +135,17 @@ pub fn play_match(a: &Player, b: &Player, deals: usize, stacks: Stacks, seed: u6
             let button = rng.gen_range(0..2usize);
             let mut deck: Vec<u8> = (0..52).collect();
             deck.shuffle(&mut rng);
+            // The plays' draws: shared by both plays, independent of the
+            // deal's own draws.
+            let pseed = SmallRng::seed_from_u64(dseed ^ 0x5DEE_CE66_D1CE_4E5B).gen::<u64>();
             let mut total = 0.0;
             for a_seat in 0..2 {
                 let players: [&Player; 2] = if a_seat == 0 { [a, b] } else { [b, a] };
-                total += play_hand(players, st, button, deck.clone(), a_seat, dseed ^ a_seat as u64, &c);
+                total += play_hand(players, st, button, deck.clone(), a_seat, pseed, &c);
             }
             total / 2.0
         })
         .collect();
-    let n = per_deal.len() as f64;
-    let mean = per_deal.iter().sum::<f64>() / n;
-    let var = per_deal.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (n - 1.0).max(1.0);
-    let to_bb100 = 100.0 / BIG_BLIND as f64;
-    MatchResult {
-        bb100: mean * to_bb100,
-        ci95: 1.96 * (var / n).sqrt() * to_bb100,
-        hands: deals * 2,
-        decisions: c.decisions.load(Relaxed),
-        fallbacks: c.fallbacks.load(Relaxed),
-    }
+    let (bb100, ci95) = summarize(&per_deal);
+    MatchResult { bb100, ci95, hands: deals * 2, decisions: c.decisions.load(Relaxed), fallbacks: c.fallbacks.load(Relaxed), per_deal }
 }

@@ -11,6 +11,7 @@
 //!   train --run NAME --abs ABS --stack 200 --iters 1e9   train one stack depth (resumable)
 //!   export --run NAME --abs ABS --stack 200              export from the latest checkpoint
 //!   eval --run NAME [--vs all|bot,...|run:OTHER] [--deals 20000] [--stacks full|sampled|200bb]
+//!   compare BASE.txt OTHER.txt ...                       paired differences of saved evals
 //!   probe --run NAME [--stack 200]                       preflop charts
 //!   livebench --run NAME [--street river|turn] [--iters 100,200,400]  time live solves
 //!   serve --run NAME [--port 8790] [--web DIR]           the engine over HTTP + the web app
@@ -167,13 +168,14 @@ fn main() {
         Some("train") => train::train_cmd(&args),
         Some("export") => train::export_cmd(&args),
         Some("eval") => play::eval_cmd(&args),
+        Some("compare") => play::compare_cmd(&args),
         Some("probe") => play::probe_cmd(&args),
         Some("livebench") => play::livebench_cmd(&args),
         Some("serve") => serve::serve_cmd(&args),
         Some("slumbot") => slumbot::slumbot_cmd(&args),
         Some("slumbot-diag") => slumbot::diag_cmd(&args),
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | probe | livebench | serve | slumbot | slumbot-diag");
+            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | compare | probe | livebench | serve | slumbot | slumbot-diag");
             std::process::exit(2);
         }
     }
