@@ -103,7 +103,7 @@ pub struct Engine {
 
 /// Abstract player of a real seat: 0 = small blind / button, 1 = big blind.
 #[inline]
-fn abs_player(seat: usize, button: usize) -> usize {
+pub fn abs_player(seat: usize, button: usize) -> usize {
     usize::from(seat != button)
 }
 
@@ -478,6 +478,24 @@ impl Engine {
             return Err(std::io::Error::other("no strategies"));
         }
         Ok(Engine { abs, strategies, live: LiveMode::Off, live_cfg: LiveCfg::default(), cache: Cache::new(256) })
+    }
+
+    /// The table's node after the hand's first `upto` actions (the same
+    /// translated walk `decide` and `table_ranges` do), or None where the
+    /// real hand leaves the abstract tree.
+    pub fn table_node(&self, v: &View, actions: &[hu_core::rules::HandAction], upto: usize) -> Option<u32> {
+        let tree = &self.pick(v.stacks[0].min(v.stacks[1])).tree;
+        let mut node = 0u32;
+        for (i, ha) in actions[..upto].iter().enumerate() {
+            let nd = &tree.nodes[node as usize];
+            if nd.player == TERMINAL || nd.player as usize != abs_player(ha.seat, v.button) || nd.street as usize != ha.street.index() {
+                return None;
+            }
+            let mut trng = SmallRng::seed_from_u64(hand_seed(v.seed, i));
+            let k = translate(tree.actions(nd), ha, &mut trng);
+            node = tree.children(nd)[k];
+        }
+        Some(node)
     }
 
     /// Each seat's range after the hand's first `upto` actions as the table

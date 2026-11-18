@@ -14,6 +14,12 @@
 //!   3. bottom-up over the turn's nodes: values and regret updates.
 //! Results are summed in a fixed order, so they don't depend on threading.
 //!
+//! Safe re-solving (`set_gadget`, see `super::safe`): the opponent's root
+//! range is replaced by a per-hand choice between entering the subgame and
+//! taking an alternative value, learned by regret matching (DCFR-discounted
+//! like the rest) alongside the solve; the opponent enters with each hand
+//! as often as the choice says.
+//!
 //! Nodes can be frozen to a given strategy (the bot's own earlier actions on
 //! this street keep the strategy it actually played), and an action can be
 //! floored: every hand takes it at least that often (the opponent's real
@@ -70,6 +76,51 @@ struct Ctx<'a> {
     disc: Disc,
 }
 
+/// The safe re-solving gadget's state (see the module docs).
+struct Gadget {
+    /// The opponent's seat.
+    opp: usize,
+    /// Each opponent hand's alternative value (counterfactual, against the
+    /// bot's root range; 0 for hands touching the board).
+    alt: Vec<f32>,
+    /// Hands the board allows.
+    valid: Vec<bool>,
+    /// Regrets of entering and of taking the alternative.
+    enter: Vec<f32>,
+    take: Vec<f32>,
+    /// The estimated range (kept for reporting and the exploitability check).
+    estimate: Vec<f32>,
+    /// The opponent's root reach is `base + weight × enter`: `base` is the
+    /// estimated range scaled to an average of 1 per hand the board allows
+    /// (zero for pure Resolve, when `weight` is None).
+    base: Vec<f32>,
+    weight: f32,
+}
+
+impl Gadget {
+    /// The opponent's root reach for the current iteration.
+    fn reach(&self) -> Vec<f32> {
+        self.strategy().iter().zip(&self.base).map(|(e, b)| b + self.weight * e).collect()
+    }
+
+    /// Probability of entering, per hand (regret matching).
+    fn strategy(&self) -> Vec<f32> {
+        (0..H)
+            .map(|h| {
+                if !self.valid[h] {
+                    return 0.0;
+                }
+                let (e, t) = (self.enter[h].max(0.0), self.take[h].max(0.0));
+                if e + t > 0.0 {
+                    e / (e + t)
+                } else {
+                    0.5
+                }
+            })
+            .collect()
+    }
+}
+
 pub struct Solver<'a> {
     pub g: &'a Subgame,
     boards: Vec<Board>,
@@ -93,6 +144,7 @@ pub struct Solver<'a> {
     floors: Vec<Option<(usize, f32)>>,
     /// Reach of each hand at the root, per seat.
     pub ranges: [Vec<f32>; 2],
+    gadget: Option<Gadget>,
     pub iterations: u32,
     pub parallel: bool,
 }
@@ -173,9 +225,63 @@ impl<'a> Solver<'a> {
             river,
             frozen: fz,
             ranges,
+            gadget: None,
             iterations: 0,
             parallel,
         }
+    }
+
+    /// The river boards: one for a river solve, one per river card for a
+    /// turn solve (in `river_cards` order).
+    pub fn boards(&self) -> &[Board] {
+        &self.boards
+    }
+
+    pub fn river_cards(&self) -> &[Card] {
+        &self.cards
+    }
+
+    /// Solve safely: the opponent (`opp`) chooses per hand between the
+    /// subgame and `alt`, its alternative value (see `super::safe`).
+    ///
+    /// `weight` None: pure Resolve (Burch et al.): the opponent's root range
+    /// is just how often each hand enters. When the alternatives are
+    /// generous, almost no hand enters and the solve stops learning. With
+    /// Some(w), the root range is the estimated range (scaled to an average
+    /// of 1 per hand) plus w × how often each hand enters: the solve plays
+    /// against the likely hands and also against every hand that would get
+    /// more than its alternative, more strictly the larger w.
+    pub fn set_gadget(&mut self, opp: usize, alt: Vec<f32>, weight: Option<f32>) {
+        assert_eq!(alt.len(), H);
+        let board: Vec<Card> = if self.cards.is_empty() { self.boards[0].cards.to_vec() } else { self.boards[0].cards[..4].to_vec() };
+        let valid: Vec<bool> = super::showdown::holes().iter().map(|[a, b]| !board.contains(a) && !board.contains(b)).collect();
+        let estimate = self.ranges[opp].clone();
+        let (base, weight) = match weight {
+            None => (vec![0f32; H], 1.0),
+            Some(w) => {
+                let n = valid.iter().filter(|&&x| x).count().max(1) as f32;
+                let mean = estimate.iter().zip(&valid).filter(|(_, &ok)| ok).map(|(x, _)| x).sum::<f32>() / n;
+                let base = estimate.iter().zip(&valid).map(|(x, &ok)| if ok && mean > 0.0 { x / mean } else { 0.0 }).collect();
+                (base, w)
+            }
+        };
+        self.gadget = Some(Gadget { opp, alt, valid, enter: vec![0.0; H], take: vec![0.0; H], estimate, base, weight });
+    }
+
+    pub fn is_safe(&self) -> bool {
+        self.gadget.is_some()
+    }
+
+    /// The gadget's current probability of entering per opponent hand.
+    pub fn gadget_enter(&self) -> Option<Vec<f32>> {
+        self.gadget.as_ref().map(|g| g.strategy())
+    }
+
+    /// Each hand's best-response counterfactual value for `p` against the
+    /// other seat's average strategy (and root range).
+    pub fn best_response_values(&mut self, p: usize) -> Vec<f32> {
+        let disc = Disc { pos: 1.0, neg: 1.0, avg: 1.0 };
+        self.walk_root(p, Mode::Best, disc)
     }
 
     /// Make every hand take `edge` at `node` with at least probability `p`.
@@ -336,9 +442,31 @@ impl<'a> Solver<'a> {
                 neg: 0.5, // β = 0
                 avg: ((t / (t + 1.0)).powf(GAMMA)) as f32,
             };
-            for p in 0..2 {
-                self.walk_root(p, Mode::Train, disc);
+            let enter = self.gadget.as_ref().map(|g| g.strategy());
+            if let Some(g) = &self.gadget {
+                self.ranges[g.opp] = g.reach();
             }
+            for p in 0..2 {
+                let v = self.walk_root(p, Mode::Train, disc);
+                if let (Some(g), Some(e)) = (self.gadget.as_mut(), &enter) {
+                    if p == g.opp {
+                        for h in 0..H {
+                            if !g.valid[h] {
+                                continue;
+                            }
+                            let node = e[h] * v[h] + (1.0 - e[h]) * g.alt[h];
+                            let d = |r: f32| if r > 0.0 { r * disc.pos } else { r * disc.neg };
+                            g.enter[h] = d(g.enter[h]) + v[h] - node;
+                            g.take[h] = d(g.take[h]) + g.alt[h] - node;
+                        }
+                    }
+                }
+            }
+        }
+        // Between runs the root range is the estimate again (reporting,
+        // exploitability); the next run picks the gadget back up.
+        if let Some(g) = &self.gadget {
+            self.ranges[g.opp] = g.estimate.clone();
         }
     }
 
@@ -359,8 +487,20 @@ impl<'a> Solver<'a> {
     }
 
     /// Exploitability of the average strategies, in chips per hand pair,
-    /// within this subgame (frozen nodes stay fixed for both players).
+    /// within this subgame (frozen nodes stay fixed for both players). A
+    /// safe solve is measured on the game it solved: the opponent's root
+    /// range is the gadget's (estimate plus the hands that enter).
     pub fn exploitability(&mut self) -> f64 {
+        let reach = self.gadget.as_ref().map(|g| (g.opp, g.reach()));
+        let saved = reach.as_ref().map(|(o, r)| std::mem::replace(&mut self.ranges[*o], r.clone()));
+        let x = self.exploitability_now();
+        if let (Some((o, _)), Some(s)) = (reach, saved) {
+            self.ranges[o] = s;
+        }
+        x
+    }
+
+    fn exploitability_now(&mut self) -> f64 {
         let disc = Disc { pos: 1.0, neg: 1.0, avg: 1.0 };
         let mut total = 0.0;
         for p in 0..2 {

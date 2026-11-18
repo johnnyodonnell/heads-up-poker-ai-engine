@@ -215,3 +215,60 @@ fn turn_menu_costs() {
     }
 }
 
+
+/// Safe re-solving holds every opponent hand to its alternative value even
+/// when the estimated range leaves hands out; unsafe re-solving doesn't.
+/// Blueprint: the subgame's equilibrium with the opponent's true (wide)
+/// range; alternative values: each opponent hand's best response to it.
+/// Estimate: the true range with every weak hand removed.
+#[test]
+fn safe_resolving_holds_every_hand_to_its_alternative() {
+    use super::showdown::{pair_weight, Board};
+    let s = at_street(Street::River, 21);
+    let g = subgame::build(&s, &[], &LiveMenu::river(), &LiveMenu::river_in_turn()).unwrap();
+    let board = s.community.clone();
+    let mut rng = SmallRng::seed_from_u64(3);
+    let ranges = random_ranges(&mut rng);
+    let bot = g.nodes[0].kind == Kind::Decision(0);
+    let (bot, opp) = if bot { (0usize, 1usize) } else { (1, 0) };
+    // The blueprint and each opponent hand's best response to it.
+    let mut bp = Solver::new(&g, &board, ranges.clone(), vec![], false);
+    bp.run(800);
+    let alt = bp.best_response_values(opp);
+    // The estimate: drop the opponent's weaker half of hands (by strength
+    // on this board), i.e. the bluffs and bluff-catchers it really has.
+    let b = Board::new([board[0], board[1], board[2], board[3], board[4]]);
+    let mut strength = vec![0f32; H];
+    let mut uniform = vec![1f32; H];
+    super::showdown::mask(&mut uniform, &board);
+    b.showdown(&uniform, 1.0, &mut strength);
+    let mut est = ranges.clone();
+    let mut order: Vec<usize> = (0..H).filter(|&h| est[opp][h] > 0.0 && uniform[h] > 0.0).collect();
+    order.sort_by(|&x, &y| strength[x].partial_cmp(&strength[y]).unwrap());
+    for &h in &order[..order.len() / 2] {
+        est[opp][h] = 0.0;
+    }
+    // How much the opponent's true range gains over its alternatives
+    // against a strategy, per hand pair.
+    let gain = |sv: &mut Solver| -> f64 {
+        let br = sv.best_response_values(opp);
+        let num: f64 = (0..H).map(|h| ranges[opp][h] as f64 * (br[h] - alt[h]).max(0.0) as f64).sum();
+        num / pair_weight(&ranges[opp], &ranges[bot])
+    };
+    let mut unsafe_sv = Solver::new(&g, &board, est.clone(), vec![], false);
+    unsafe_sv.run(800);
+    let unsafe_gain = gain(&mut unsafe_sv);
+    let mut safe_sv = Solver::new(&g, &board, est, vec![], false);
+    safe_sv.set_gadget(opp, alt.clone(), None);
+    safe_sv.run(800);
+    let safe_gain = gain(&mut safe_sv);
+    let pot = g.pot as f64;
+    println!("gain over the alternatives: unsafe {:.2}% of the pot, safe {:.2}%", unsafe_gain / pot * 100.0, safe_gain / pot * 100.0);
+    assert!(unsafe_gain / pot > 0.05, "the unsafe solve should be exploitable by the hands it left out ({unsafe_gain})");
+    assert!(safe_gain / pot < 0.01, "the safe solve should hold every hand to its alternative ({safe_gain})");
+    assert!(safe_gain < unsafe_gain / 10.0);
+    // Every hand (weighted or not) gets to choose: the gadget enters with
+    // hands the estimate dropped too.
+    let enter = safe_sv.gadget_enter().unwrap();
+    assert!(order[..order.len() / 2].iter().any(|&h| enter[h] > 0.0));
+}

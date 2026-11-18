@@ -24,6 +24,8 @@ export interface LiveDebug {
   exploitability_pct: number;
   bot_range: number;
   opp_range: number;
+  // Safe solve: every hand you could hold was held to what it gets against the table.
+  safe?: boolean;
 }
 
 export interface DecisionDebug {

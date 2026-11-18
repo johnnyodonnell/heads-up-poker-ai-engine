@@ -42,6 +42,7 @@ export default function DebugPanel({ enabled, onToggle, decisions }: DebugPanelP
                   {d.debug.live.decision_nodes} decision points), within {d.debug.live.exploitability_pct.toFixed(1)}% of the
                   pot of equilibrium · ranges: bot {Math.round(d.debug.live.bot_range)}, you{" "}
                   {Math.round(d.debug.live.opp_range)} hand combos
+                  {d.debug.live.safe ? " · safe (no hand of yours does better than against the table)" : ""}
                 </div>
               )}
               {d.debug.path.length > 0 && (

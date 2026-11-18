@@ -16,6 +16,7 @@
 //! - Solves are deterministic (fixed iterations, ordered sums), so anything
 //!   missing from the per-hand cache is recomputed exactly.
 
+pub mod safe;
 pub mod showdown;
 pub mod solver;
 pub mod subgame;
@@ -33,6 +34,7 @@ use hu_core::rules::{HandAction, State, Street};
 use crate::engine::{action_label, state_at_street, Debug, Decision, Engine, HistAction, Opt, View};
 use crate::menu::LiveMenu;
 use showdown::{hand, mask, H};
+pub use safe::SafeMode;
 use solver::Solver;
 use subgame::{Kind, Subgame};
 
@@ -105,6 +107,15 @@ pub struct LiveCfg {
     pub opp_temper: f32,
     /// The turn's menu in turn solves.
     pub turn_menu: LiveMenu,
+    /// Safe re-solving (`safe`): every opponent hand is held to what it
+    /// would get against the table, instead of trusting the estimated range.
+    /// Falls back to the estimate where the hand has left the table's tree.
+    pub safe: SafeMode,
+    /// How strictly safe solves hold hands to their alternative values:
+    /// the weight of "every hand that would beat its alternative" next to
+    /// the estimated range at the root (`Solver::set_gadget`); None = pure
+    /// Resolve (no estimate at all).
+    pub safe_weight: Option<f32>,
 }
 
 impl Default for LiveCfg {
@@ -128,6 +139,13 @@ impl Default for LiveCfg {
             opp_sizes: true,
             opp_temper: 0.5,
             turn_menu: LiveMenu::turn_by_name("medium").unwrap(),
+            // Safe re-solving against best responses to the table, with the
+            // likely hands counted too (`hu livebench --check-safe` on real
+            // 200bb spots: hands beat their table value by 9x less than in
+            // unsafe solves on the turn, 5x less on the river, and the
+            // solves do no worse against the estimated range).
+            safe: SafeMode::Best,
+            safe_weight: Some(2.0),
         }
     }
 }
@@ -144,9 +162,14 @@ pub struct LiveDebug {
     pub decision_nodes: usize,
     /// Of the solve this decision used, in % of the pot at its root.
     pub exploitability_pct: f64,
-    /// Root range sizes, in hand combos (out of 1,326).
+    /// Root range sizes, in hand combos (out of 1,326): the bot's range
+    /// (each hand weighted by how often it plays this way), and the
+    /// effective number of hands in the opponent's estimated range.
     pub bot_range: f64,
     pub opp_range: f64,
+    /// Whether the solve was safe (held every opponent hand to its value
+    /// against the table) or trusted the estimated opponent range.
+    pub safe: bool,
 }
 
 /// A finished solve: the tree and the average strategy at its current-street
@@ -159,6 +182,7 @@ pub struct Solved {
     pub iterations: u32,
     pub ms: u64,
     pub exploitability: f64,
+    pub safe: bool,
 }
 
 type HandKey = (u64, usize);
@@ -190,6 +214,16 @@ fn solve_hash(v: &View, street: Street, upto: usize) -> u64 {
         eat(a.to as u64);
     }
     h
+}
+
+/// (Σw)² / Σw²: how many hands a weighted range amounts to.
+fn effective_hands(w: &[f32]) -> f64 {
+    let (s, sq) = w.iter().fold((0f64, 0f64), |(s, q), &x| (s + x as f64, q + (x as f64).powi(2)));
+    if sq > 0.0 {
+        s * s / sq
+    } else {
+        0.0
+    }
 }
 
 /// Recent hands' solves, so later decisions in a hand reuse them.
@@ -327,7 +361,7 @@ fn floor_opponent_line(sv: &mut Solver, g: &Subgame, forced: &[HistAction], bot:
 #[allow(clippy::too_many_arguments)]
 fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: Street, n: usize, st: &mut Stats) -> Result<Arc<Solved>, String> {
     let k = street_start(&s.actions, street);
-    let sk = (mode as usize, street.index(), n, solve_hash(v, street, k + n));
+    let sk = (mode as usize * 4 + e.live_cfg.safe as usize, street.index(), n, solve_hash(v, street, k + n));
     if let Some(x) = e.cache.get(key, sk) {
         return Ok(x);
     }
@@ -363,10 +397,17 @@ fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: 
     let iters = if street == Street::River { e.live_cfg.river_iters } else { e.live_cfg.turn_iters };
     let t0 = Instant::now();
     let board = &v.board[..board_len(street)];
-    let (strat, ranges, exploitability) = {
+    let (strat, ranges, exploitability, safe) = {
         let mut sv = Solver::new(&g, board, ranges, fz, e.live_cfg.parallel);
         floor_opponent_line(&mut sv, &g, &forced, v.bot, e.live_cfg.opp_line);
+        if e.live_cfg.safe != SafeMode::Off {
+            let alt = safe::table_values(e, v, &s.actions, k, &sv.ranges[v.bot], sv.boards(), sv.river_cards(), e.live_cfg.safe == SafeMode::Best, g.pot, e.live_cfg.parallel);
+            if let Some(alt) = alt {
+                sv.set_gadget(1 - v.bot, alt, e.live_cfg.safe_weight);
+            }
+        }
         sv.run(iters);
+        let safe = sv.is_safe();
         let x = sv.exploitability();
         let mut strat = HashMap::new();
         for (i, nd) in g.nodes.iter().enumerate() {
@@ -374,12 +415,12 @@ fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: 
                 strat.insert(i as u32, sv.strategy(i as u32));
             }
         }
-        (strat, sv.ranges.clone(), x)
+        (strat, sv.ranges.clone(), x, safe)
     };
     let ms = t0.elapsed().as_millis() as u64;
     st.solves += 1;
     st.ms += ms;
-    let solved = Arc::new(Solved { g, strat, ranges, iterations: iters, ms, exploitability });
+    let solved = Arc::new(Solved { g, strat, ranges, iterations: iters, ms, exploitability, safe });
     e.cache.put(key, sk, solved.clone());
     Ok(solved)
 }
@@ -450,7 +491,8 @@ pub fn decide(e: &Engine, v: &View, s: &State, mode: LiveMode, rng: &mut SmallRn
         decision_nodes: g.decisions(),
         exploitability_pct: solved.exploitability / g.pot.max(1) as f64 * 100.0,
         bot_range: solved.ranges[v.bot].iter().map(|&x| x as f64).sum(),
-        opp_range: solved.ranges[1 - v.bot].iter().map(|&x| x as f64).sum(),
+        opp_range: effective_hands(&solved.ranges[1 - v.bot]),
+        safe: solved.safe,
     });
     Ok(Decision { action, debug: dbg })
 }
@@ -544,10 +586,105 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
     let t0 = Instant::now();
     let mut sv = Solver::new(&g, &v.board[..board_len(street)], ranges, fz, e.live_cfg.parallel);
     floor_opponent_line(&mut sv, &g, &v.actions[k..k + n], v.bot, e.live_cfg.opp_line);
+    if e.live_cfg.safe != SafeMode::Off {
+        let alt = safe::table_values(e, v, &s.actions, k, &sv.ranges[v.bot], sv.boards(), sv.river_cards(), e.live_cfg.safe == SafeMode::Best, g.pot, e.live_cfg.parallel);
+        if let Some(alt) = alt {
+            sv.set_gadget(1 - v.bot, alt, e.live_cfg.safe_weight);
+        }
+    }
     sv.run(iters);
     let ms = t0.elapsed().as_millis() as u64;
     let x = sv.exploitability();
     Ok((ms, x / g.pot.max(1) as f64 * 100.0, g.decisions(), sv.size()))
+}
+
+/// What `safe_check` measured on one spot.
+#[derive(Debug, Default)]
+pub struct SafeCheck {
+    /// Time to compute both kinds of alternative values.
+    pub alt_ms: u64,
+    /// Share of hands whose best-response value against the table is below
+    /// its value playing the table (should be 0).
+    pub best_below_table: f64,
+    /// How much the opponent's hands, every hand the board allows counted
+    /// alike, get above their best against the table: against an unsafe
+    /// solve and a safe one (`Best` values), in % of the pot per hand pair.
+    pub gain_unsafe: f64,
+    pub gain_safe: f64,
+    /// Share of those hands the safe solve's gadget enters with.
+    pub enter: f64,
+    /// What a best-responding opponent with the estimated range wins
+    /// against each solve, in % of the pot per hand pair (the unsafe solve
+    /// minimizes this).
+    pub est_unsafe: f64,
+    pub est_safe: f64,
+}
+
+/// Safe vs unsafe solves of the bot's current decision with `iters`
+/// iterations (outside the cache).
+pub fn safe_check(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<SafeCheck, String> {
+    let s = crate::engine::replay(v)?;
+    let street = s.street;
+    let k = street_start(&s.actions, street);
+    let n = s.actions.len() - k;
+    let mut st = Stats::default();
+    let key = (v.seed ^ 0x5AFE_0000_0000_0000, v.bot);
+    let ranges = street_ranges(e, v, &s, mode, key, street, &mut st)?;
+    let mut fz = Vec::new();
+    for (j, a) in v.actions[k..k + n].iter().enumerate() {
+        if a.seat == v.bot {
+            let prev = solve(e, v, &s, mode, key, street, j, &mut st)?;
+            fz.push((j, prev.strat[&prev.g.path[j]].clone()));
+        }
+    }
+    let start = state_at_street(v, k, street)?;
+    let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
+    let g = subgame::build(&start, &v.actions[k..k + n], &menu, &LiveMenu::river_in_turn())?;
+    let fz: Vec<(u32, Vec<f32>)> = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
+    let board = &v.board[..board_len(street)];
+    let opp = 1 - v.bot;
+    let new_solver = || {
+        let mut sv = Solver::new(&g, board, ranges.clone(), fz.clone(), e.live_cfg.parallel);
+        floor_opponent_line(&mut sv, &g, &v.actions[k..k + n], v.bot, e.live_cfg.opp_line);
+        sv
+    };
+    let mut un = new_solver();
+    let rb = un.ranges[v.bot].clone();
+    let t0 = Instant::now();
+    let par = e.live_cfg.parallel;
+    let alt_t = safe::table_values(e, v, &s.actions, k, &rb, un.boards(), un.river_cards(), false, g.pot, par).ok_or("the hand left the table's tree")?;
+    let alt_b = safe::table_values(e, v, &s.actions, k, &rb, un.boards(), un.river_cards(), true, g.pot, par).ok_or("the hand left the table's tree")?;
+    let alt_ms = t0.elapsed().as_millis() as u64;
+    let hs = showdown::holes();
+    let valid: Vec<usize> = (0..H).filter(|&h| !board.contains(&hs[h][0]) && !board.contains(&hs[h][1])).collect();
+    let below = valid.iter().filter(|&&h| alt_b[h] < alt_t[h] - 1e-3 * alt_t[h].abs().max(1.0)).count();
+    let bot_mass: f64 = rb.iter().map(|&x| x as f64).sum();
+    let gain = |br: &[f32]| -> f64 {
+        let total: f64 = valid.iter().map(|&h| (br[h] - alt_b[h]).max(0.0) as f64).sum();
+        total / valid.len() as f64 / bot_mass.max(1e-9) / g.pot.max(1) as f64 * 100.0
+    };
+    let est = un.ranges[opp].clone();
+    let pairs = showdown::pair_weight(&est, &rb).max(1e-9);
+    let est_value = |br: &[f32]| -> f64 { est.iter().zip(br).map(|(&r, &x)| r as f64 * x as f64).sum::<f64>() / pairs / g.pot.max(1) as f64 * 100.0 };
+    un.run(iters);
+    let br = un.best_response_values(opp);
+    let (gain_unsafe, est_unsafe) = (gain(&br), est_value(&br));
+    let mut sf = new_solver();
+    let alt = if e.live_cfg.safe == SafeMode::Table { alt_t } else { alt_b.clone() };
+    sf.set_gadget(opp, alt, e.live_cfg.safe_weight);
+    sf.run(iters);
+    let br = sf.best_response_values(opp);
+    let (gain_safe, est_safe) = (gain(&br), est_value(&br));
+    let enter = sf.gadget_enter().unwrap();
+    Ok(SafeCheck {
+        alt_ms,
+        best_below_table: below as f64 / valid.len() as f64,
+        gain_unsafe,
+        gain_safe,
+        enter: valid.iter().map(|&h| enter[h] as f64).sum::<f64>() / valid.len() as f64,
+        est_unsafe,
+        est_safe,
+    })
 }
 
 #[cfg(test)]

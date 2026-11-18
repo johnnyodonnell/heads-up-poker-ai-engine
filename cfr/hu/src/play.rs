@@ -8,8 +8,9 @@
 //!   hu probe --run NAME [--stack 200]   preflop charts: the small blind's first
 //!       action and the big blind facing a 2.5bb open
 //!   hu livebench --run NAME [--street river|turn] [--spots 20] [--iters 100,200,400]
-//!       [--stack 400]   time live solves of real spots and measure how close
-//!       to equilibrium they get
+//!       [--stack 400] [--check-safe]   time live solves of real spots and
+//!       measure how close to equilibrium they get (or compare safe and
+//!       unsafe solves of them)
 //!
 //! Live flags (eval, serve, slumbot, slumbot-diag, livebench): --live
 //! off|river|turn, --river-iters N, --turn-iters N, --turn-menu
@@ -19,7 +20,11 @@
 //! (exponent on those likelihoods), --opp-sizes on|off (a bet's likelihood is
 //! betting at any size), --opp-mix F (share of "any hand" in the opponent's
 //! range at a solve's start), --opp-line F (least probability of every
-//! opponent hand taking the opponent's real actions on the solved street).
+//! opponent hand taking the opponent's real actions on the solved street),
+//! --safe off|table|best (safe re-solving: hold every opponent hand to its
+//! value against the table, the opponent playing the table or best-responding),
+//! --safe-weight W|resolve (how strictly: weight of the hands that would beat
+//! their table value next to the estimated range; resolve = no estimate).
 //! `run:OTHER` rivals always play their table only (`run:NAME` with the same
 //! run: the run without live solving).
 
@@ -92,6 +97,12 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
     }
     if let Some(f) = flag(args, "--opp-temper") {
         e.live_cfg.opp_temper = f.parse().expect("--opp-temper 0..1");
+    }
+    if let Some(m) = flag(args, "--safe") {
+        e.live_cfg.safe = hu_cfr::live::SafeMode::parse(&m).unwrap_or_else(|| panic!("--safe off|table|best, not {m}"));
+    }
+    if let Some(w) = flag(args, "--safe-weight") {
+        e.live_cfg.safe_weight = if w == "resolve" { None } else { Some(w.parse().expect("--safe-weight W|resolve")) };
     }
     if let Some(f) = flag(args, "--opp-sizes") {
         e.live_cfg.opp_sizes = match f.as_str() {
@@ -326,6 +337,34 @@ pub fn livebench_cmd(args: &[String]) {
                 ld.ms, ld.exploitability_pct, ld.bot_range, ld.opp_range, show(&l.debug)
             );
         }
+    }
+    if args.iter().any(|a| a == "--check-safe") {
+        // Safe vs unsafe solves on each spot, with the last --iters count.
+        let it = *iters.last().unwrap();
+        let mut rows = Vec::new();
+        for v in &spots {
+            match live::safe_check(&engine, v, mode, it) {
+                Ok(c) => rows.push(c),
+                Err(e) => log(format!("spot skipped: {e}")),
+            }
+        }
+        let mean = |f: &dyn Fn(&live::SafeCheck) -> f64| rows.iter().map(f).sum::<f64>() / rows.len().max(1) as f64;
+        let max = |f: &dyn Fn(&live::SafeCheck) -> f64| rows.iter().map(f).fold(0.0, f64::max);
+        log(format!(
+            "{} spots, {it} iterations: alternative values {:.0} ms mean | best-response values below table values on {:.2}% of hands (max {:.2}%) | opponent hands above their best against the table: unsafe {:.3}% of the pot per hand pair (max {:.3}), safe {:.3}% (max {:.3}) | gadget enters with {:.0}% of hands | estimated range best-responding wins: unsafe {:.2}% of the pot, safe {:.2}%",
+            rows.len(),
+            mean(&|c| c.alt_ms as f64),
+            mean(&|c| c.best_below_table) * 100.0,
+            max(&|c| c.best_below_table) * 100.0,
+            mean(&|c| c.gain_unsafe),
+            max(&|c| c.gain_unsafe),
+            mean(&|c| c.gain_safe),
+            max(&|c| c.gain_safe),
+            mean(&|c| c.enter) * 100.0,
+            mean(&|c| c.est_unsafe),
+            mean(&|c| c.est_safe)
+        ));
+        return;
     }
     for &it in &iters {
         let mut ms = Vec::new();
