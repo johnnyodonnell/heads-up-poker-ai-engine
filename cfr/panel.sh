@@ -33,11 +33,10 @@ for phase in ${PANEL_PHASES:-river probes turn}; do
         ev river-unsafe "$st" 10000 "$PROBES" --live river --safe off
       done ;;
     turn)
+      # Live turn plays ~1.6 hands/s on the whole box, so only 200bb
+      # (Slumbot's depth) and only safe solving (safe >= unsafe on the river).
       ev table 200bb 8000 "$RUNS"
       ev turn-safe 200bb 8000 "$RUNS" --live turn
-      ev turn-unsafe 200bb 8000 run:v1a --live turn --safe off
-      ev table full 6000 run:v1b,run:v1a
-      ev turn-safe full 6000 run:v1b,run:v1a --live turn
       ev table 200bb 2000 maniac,minbet
       ev turn-safe 200bb 2000 maniac,minbet --live turn ;;
   esac
