@@ -27,7 +27,8 @@ hu_cfr/           the engine:
   score.rs          advantage scoring: live solving's edge over the table,
                     scored decision by decision
   live/             live solving: subgame tree, vectorized DCFR, showdowns,
-                    safe re-solving against the table's values
+                    safe re-solving against the table's values, the GPU path
+  cuda/river.cu     the GPU kernel for turn solves' river subtrees
   pushfold.rs, toy.rs, br.rs   solver validation games and exact best response
 hu/               the `hu` command line (abstraction, train, export, eval, compare,
                   probe, livebench, rangecheck, scorecheck, serve, tree, pushfold)
@@ -152,9 +153,9 @@ How a live decision is made (`hu_cfr/src/live/`):
   to the strategy it actually played.
 - **The solver** is Discounted CFR (α 1.5, β 0, γ 2), full-width and
   vectorized over all hands of both players, with exact card removal. River
-  solves run 400 iterations (about 0.5 s), turn solves 150 (about 1.9 s on
-  the box, river cards in parallel). Solves are deterministic, and cached per
-  hand so later decisions reuse earlier ones.
+  solves run 400 iterations (about 0.5 s), turn solves 150 (about 1 s with
+  the GPU, below; 2 s on the box's 20 CPU cores). Solves are deterministic,
+  and cached per hand so later decisions reuse earlier ones.
 - **Ranges.** The bot's range is exact (its own strategy). The opponent's is
   estimated from the table: how likely each hand was to play the hand this
   way if the opponent played like our table.
@@ -179,10 +180,11 @@ Checking it:
 cargo test --release -p hu_cfr live         # solver unit tests (below)
 hu livebench --run v1c --street turn --spots 20 --iters 150,300   # time and convergence on real spots
 hu livebench --run v1c --street river --spots 40 --iters 400 --check-safe   # safe vs unsafe solves
+hu livebench --run v1c --street turn --spots 10 --iters 150 --compare-gpu   # GPU vs CPU solves (identical)
 hu rangecheck --run v1c --opp-run v1a       # how well the table's range estimates fit another run's play
 hu scorecheck --run v1c --opp-run v1a --spots 3000   # checks of advantage scoring on real spots
 hu compare A.txt B.txt                      # paired difference of two saved matches
-./panel.sh; ./panel_report.sh               # the test panel (below) and its paired results
+./panel.sh; ./panel_report.sh               # the test panel (round 2, below) and its results
 ```
 
 The unit tests check the solver against a polarized river toy with a known
@@ -190,6 +192,43 @@ equilibrium, showdown and fold payoffs against brute force, convergence and
 determinism of river and turn solves, off-menu actions, and that safe
 solving holds hands an estimate left out to their alternatives while unsafe
 solving doesn't (0.34% vs 12.9% of the pot).
+
+### The GPU
+
+Turn solves run their river half on the box's GPU (`--gpu on`, the default;
+`hu_cfr/cuda/river.cu`, compiled by `hu_cfr/build.rs` with the `gpu`
+feature, on by default in `hu`; `--no-default-features` builds without
+CUDA). A turn solve's traversal walks a river subtree for every (turn line,
+river card) pair, about 900 of them for a typical spot; on the GPU each is
+one thread block, all at once, with their regrets kept in GPU memory for
+the whole solve, while the turn's own nodes stay on the CPU.
+
+The kernel does the CPU's arithmetic operation for operation (no fused
+multiply-adds, sums in the same order), so GPU and CPU solves are
+bit-identical: `hu livebench --street turn --compare-gpu` solves spots both
+ways and reports the largest strategy difference, which is 0. To make that
+possible the CPU's long sums at showdowns and folds now run in a fixed
+chunked order that the GPU can take in parallel (`showdown::chunked_prefix`);
+this changed the solver's results only in the last bits.
+
+On real 200bb turn spots a solve takes 1.0 s with the GPU against 2.0 s on
+all 20 CPU cores (same strategies, same exploitability). In a batch
+evaluation, 400 live-turn hands against v1c took:
+
+| Turn solves | Time | Turn solves on the GPU |
+|---|---|---|
+| CPU only | 293 s | 0 of 197 |
+| GPU, 2 at a time | 161 s | 111 |
+| GPU, 4 at a time (default) | **124 s** (2.4× faster) | 132 |
+| GPU, all of them | 151 s | 197 |
+
+with the same result deal by deal in all four.
+
+The box's CPU and GPU share one memory (LPDDR5x, about 273 GB/s), and turn
+solves are limited by memory traffic on both, so the GPU's edge is bounded.
+`--gpu-slots N` (default 4) caps the turn solves on the GPU at once; a solve
+that finds the GPU busy runs on the CPU, with the same result, so a batch
+evaluation uses both.
 
 ### Why safe, and the Slumbot runs
 
@@ -207,16 +246,16 @@ bb/100 in a day of play, and its rate limits made long runs unreliable, so
 it is no longer part of testing: the engine is tested only against bots
 built here (the earlier tables and the scripted bots).
 
-### The test panel
+### The test panel (round 1)
 
-`panel.sh` plays the table, safe live and unsafe live (`--safe off`) against
+Round 1 played the table, safe live and unsafe live (`--safe off`) against
 the earlier tables (v1c itself, v1b, v1a) and the scripted bots, at 200bb
-(Slumbot's depth) and 100bb. Every match is saved deal by deal, and the
-deals and the opponent's random draws depend only on the seed, so two
-variants are compared on identical deals (`hu compare`): only their
-decisions differ. Gates, set before the runs: safe live no worse than the
-table against any opponent, better against the other tables, and still
-beating every scripted bot by a wide margin.
+(Slumbot's depth) and 100bb (`panel.sh` now runs round 2, below). Every
+match is saved deal by deal, and the deals and the opponent's random draws
+depend only on the seed, so two variants are compared on identical deals
+(`hu compare`): only their decisions differ. Gates, set before the runs:
+safe live no worse than the table against any opponent, better against the
+other tables, and still beating every scripted bot by a wide margin.
 
 River, safe live minus the table on the same 50,000 duplicate deals
 (100,000 hands), bb/100:
@@ -270,6 +309,78 @@ the whole box, so a match plays ~1.6 hands/s and the samples are small:
 No gain over the table shows at this size (+2.9 ± 13.0 pooled over the
 three tables), and the turn adds the river's gap against the bots that
 never fold. Live turn is not worth its 2 s per decision yet; live river is.
+
+### Scoring live solving against the table
+
+The panel's paired results are noisy because most of a hand's outcome is
+luck that live solving doesn't change: the cards still to come, the hand
+the opponent happens to hold, which of its mixed actions each player
+happened to pick. Advantage scoring (`hu_cfr/src/score.rs`) removes that
+luck. Against a table opponent every strategy is known exactly at every
+decision: the live solve's, the table's (what the bot would have played
+instead), and the opponent's. So each live decision is scored by its
+advantage over the table:
+
+    Σ over real actions a of (live probability of a − table probability of a) × Q(a)
+
+where Q(a) is what the bot expects after taking a with both players playing
+their tables from there: the real game tree walked exactly (the same
+translation, rounding and fallback as in play, every river card, showdowns
+and all-ins scored exactly), the opponent's hand weighted by its exact
+range (how likely each hand was to play the hand so far as its table
+plays). Summed over a hand's live decisions, this has exactly the same
+expectation as the bot's result playing live minus its result playing the
+table against this opponent (the performance difference lemma, Kakade &
+Langford 2002; a form of AIVAT, Burch et al. 2018). No table match is
+needed.
+
+`hu eval` prints it for live matches against a table ("scored live -
+table") and with `--save` writes it per deal (`.adv`). `.advfull` scores
+against the opponent's real hand instead of its range: no range involved,
+noisier, and a check on the range. The equity fallback is deterministic
+(exact equity on the turn and river) so that every decision's
+probabilities are known.
+
+Checks. `hu scorecheck` on 3,000 real spots (v1c against v1a): each Q
+equals an independent exact walk through the served decision path and the
+rules engine's own payouts (to 1e-14); each range equals the product of the
+opponent's decision probabilities (to 3e-16); the opponent's real hand falls
+evenly through its range (9–11% of spots in each tenth). On matches at
+100bb, 50,000 deals each, scored and paired results agree, also on a big
+effect (a deliberately weak live river, one solver iteration):
+
+| Live river − table, bb/100 | vs v1c | vs v1a |
+|---|---|---|
+| Paired (live match minus table match) | +4.7 ± 3.9 | +0.4 ± 4.4 |
+| Scored (opponent's range) | **+2.3 ± 1.4** | **−0.2 ± 1.4** |
+| Scored (opponent's real hand) | +1.9 ± 3.1 | −0.5 ± 3.1 |
+| One iteration, paired | −67.1 ± 7.6 | −78.5 ± 7.9 |
+| One iteration, scored | −71.4 ± 2.8 | −77.3 ± 2.9 |
+
+Deal by deal, paired minus scored is consistent with zero in all eight
+comparisons. The scored error bars are 2.7–3.1× narrower: 7–10× fewer deals
+for the same precision.
+
+### Test round 2
+
+Set before running (`panel.sh`, `panel_report.sh`; results under
+`$HU_HOME/evals/round2`). The question: does live solving plus the table
+beat the table alone?
+
+- **Opponents:** v1c (the table itself: its own range estimates fit it,
+  the best case for live solving) and v1a (the earlier table whose play
+  fits v1c's model worst, as Slumbot's did). v1b, in between, is dropped.
+  The scripted bots are a sanity check.
+- **Depth:** 100bb, the app's.
+- **Measure:** scored live − table (opponent's range), with the paired
+  matches as a cross-check. Live river: 50,000 deals per opponent (about
+  ±1.4 bb/100 each, ±1 pooled). Live turn: 12,000 deals per opponent to
+  start, extended (`TURN_FROM`) if it misses ±3 bb/100; compared with live
+  river on the same deals.
+- **Gates for live river vs the table** (and the same for live turn vs
+  live river): the gain pooled over v1c and v1a has a 95% interval above
+  zero; against neither opponent does the 95% interval lie entirely below
+  zero; and it still beats every scripted bot (95% interval above zero).
 
 ## Saved runs
 

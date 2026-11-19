@@ -1,44 +1,38 @@
 #!/usr/bin/env bash
-# The live-solving test panel (internal opponents only): table-only, unsafe
-# and safe live solving against the earlier tables and the probe bots, at
-# 200bb and 100bb, every match saved per deal ($HU_HOME/evals/panel) so
-# variants are compared on identical deals (`hu compare`).
+# The live-solving test panel, round 2 (design and gates: README, "Test
+# round 2"). Internal opponents only (v1c, v1a), 100bb, seed 2, every match
+# saved deal by deal under $HU_HOME/evals/round2. Live matches against a
+# table are scored against the table (`hu_cfr::score`, the .adv files): the
+# main measure. The table matches give the paired cross-check.
 #
-#   cfr/box.sh 'nohup ./panel.sh > $HU_HOME/logs/panel.log 2>&1 &'
+#   cfr/box_bg.sh panel ./panel.sh          # then: cfr/box.sh ./panel_report.sh
 #
-# PANEL_PHASES (default "river probes turn") picks the parts to run.
+# PANEL_PHASES (default "river probes turn") picks the parts. The turn
+# phase plays TURN_DEALS deals from TURN_FROM (to extend it later without
+# replaying deals).
 set -uo pipefail
 cd "$(dirname "$0")"
 source ./box_env.sh
-S=$HU_HOME/evals/panel
+S=$HU_HOME/evals/round2
 HU=./target/release/hu
-RUNS="run:v1c,run:v1b,run:v1a"
+RUNS="run:v1c,run:v1a"
 PROBES="station,maniac,nit,shover,minbet,overbet,random"
-ev() { # tag stacks deals vs [flags...]
-  local tag=$1 stacks=$2 deals=$3 vs=$4; shift 4
-  $HU eval --run v1c --vs "$vs" --deals "$deals" --stacks "$stacks" --save "$S" --tag "$tag" "$@" 2>&1 | grep " vs "
+ev() { # tag deals vs [flags...]
+  local tag=$1 deals=$2 vs=$3; shift 3
+  $HU eval --run v1c --vs "$vs" --deals "$deals" --stacks full --seed 2 --save "$S" --tag "$tag" "$@" 2>&1 | grep " vs "
 }
 for phase in ${PANEL_PHASES:-river probes turn}; do
   case $phase in
     river)
-      for st in 200bb full; do
-        ev table "$st" 50000 "$RUNS"
-        ev river-safe "$st" 50000 "$RUNS" --live river
-        ev river-unsafe "$st" 50000 "$RUNS" --live river --safe off
-      done ;;
+      ev table 50000 "$RUNS"
+      ev river 50000 "$RUNS" --live river ;;
     probes)
-      for st in 200bb full; do
-        ev table "$st" 10000 "$PROBES"
-        ev river-safe "$st" 10000 "$PROBES" --live river
-        ev river-unsafe "$st" 10000 "$PROBES" --live river --safe off
-      done ;;
+      ev table 5000 "$PROBES"
+      ev river 5000 "$PROBES" --live river
+      # The turn only where the river panel showed a gap.
+      ev turn 1000 station,maniac,minbet --live turn ;;
     turn)
-      # Live turn plays ~1.6 hands/s on the whole box, so only 200bb
-      # (Slumbot's depth) and only safe solving (safe >= unsafe on the river).
-      ev table 200bb 8000 "$RUNS"
-      ev turn-safe 200bb 8000 "$RUNS" --live turn
-      ev table 200bb 2000 maniac,minbet
-      ev turn-safe 200bb 2000 maniac,minbet --live turn ;;
+      ev turn "${TURN_DEALS:-12000}" "$RUNS" --live turn --from "${TURN_FROM:-0}" ;;
   esac
 done
 echo "=== panel done"

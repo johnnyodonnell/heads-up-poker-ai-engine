@@ -5,6 +5,10 @@
 //! sort the board's hands by strength once, then sweep up and down keeping
 //! the opponent weight below/above and the part of it holding each card;
 //! the same idea as `abs::equity::river_ehs`, with weights.
+//!
+//! Long sums are taken in a fixed chunked order (`chunked_prefix`, fold's
+//! total) that the GPU solver (`super::gpu`) can take in parallel, so both
+//! give bit-identical results.
 
 use std::sync::OnceLock;
 
@@ -60,19 +64,55 @@ pub fn mask(w: &mut [f32], cards: &[Card]) {
     }
 }
 
+/// Hands per chunk of fold's total (the GPU sums the same chunks).
+pub const FOLD_CHUNK: usize = 64;
+/// Positions per chunk of the showdown sweeps' sums.
+pub const CHUNK: usize = 32;
+
+/// Exclusive prefix sums of `x(0..n)` into `out[..n]`, in a fixed order the
+/// GPU solver takes in parallel: `CHUNK`-element chunks each summed in
+/// order, the chunk sums accumulated in order (each chunk's start), and
+/// within a chunk its start plus its elements in order.
+pub fn chunked_prefix(n: usize, x: impl Fn(usize) -> f32, out: &mut [f32]) {
+    let chunks = n.div_ceil(CHUNK);
+    let mut sums = [0f32; H / CHUNK + 1];
+    for (c, s) in sums.iter_mut().enumerate().take(chunks) {
+        let mut t = 0f32;
+        for j in c * CHUNK..((c + 1) * CHUNK).min(n) {
+            t += x(j);
+        }
+        *s = t;
+    }
+    let mut start = 0f32;
+    for (c, s) in sums.iter().enumerate().take(chunks) {
+        let mut t = start;
+        for j in c * CHUNK..((c + 1) * CHUNK).min(n) {
+            out[j] = t;
+            t += x(j);
+        }
+        start += s;
+    }
+}
+
 /// `out[h] = v ×` (opponent weight of hands disjoint from `h`).
 pub fn fold(opp: &[f32], v: f32, out: &mut [f32]) {
     let hs = holes();
     let mut card = [0f32; 52];
-    let mut total = 0f32;
     for h in 0..H {
         let w = opp[h];
         if w != 0.0 {
             let [a, b] = hs[h];
             card[a as usize] += w;
             card[b as usize] += w;
-            total += w;
         }
+    }
+    let mut total = 0f32;
+    for chunk in opp.chunks(FOLD_CHUNK) {
+        let mut t = 0f32;
+        for &w in chunk {
+            t += w;
+        }
+        total += t;
     }
     for h in 0..H {
         let [a, b] = hs[h];
@@ -98,6 +138,9 @@ pub struct Board {
     cb: Vec<u8>,
     /// Start of each group of equal strength, then the number of hands.
     groups: Vec<u32>,
+    /// The positions with groups descending, ascending within a group (the
+    /// down sweep's order).
+    down: Vec<u16>,
 }
 
 impl Board {
@@ -121,13 +164,24 @@ impl Board {
             }
         }
         groups.push(hands.len() as u32);
+        let mut down = Vec::with_capacity(hands.len());
+        for g in groups.windows(2).rev() {
+            down.extend(g[0] as u16..g[1] as u16);
+        }
         Board {
             cards,
             idx: hands.iter().map(|x| x.1).collect(),
             ca: hands.iter().map(|x| x.2).collect(),
             cb: hands.iter().map(|x| x.3).collect(),
             groups,
+            down,
         }
+    }
+
+    /// The sorted hands' indices and cards, and the group boundaries (for
+    /// the GPU solver).
+    pub fn parts(&self) -> (&[u16], &[u8], &[u8], &[u32], &[u16]) {
+        (&self.idx, &self.ca, &self.cb, &self.groups, &self.down)
     }
 
     /// Showdown for `s` chips each: `out[h] = s × (opponent weight `h` beats
@@ -140,31 +194,35 @@ impl Board {
         for k in 0..n {
             w[k] = opp[idx[k] as usize];
         }
-        // Up: weight strictly below each hand.
+        // The weight below each position and above each (in the down
+        // order), as chunked sums; read at each group's first position.
+        let mut below = [0f32; H];
+        chunked_prefix(n, |k| w[k], &mut below);
+        let mut above = [0f32; H];
+        chunked_prefix(n, |j| w[self.down[j] as usize], &mut above);
+        // Up: minus each card's part of the weight below (hands sharing a
+        // card never meet).
         let mut net = [0f32; H];
-        let mut below = 0f32;
         let mut card = [0f32; 52];
         for g in self.groups.windows(2) {
             let (i, j) = (g[0] as usize, g[1] as usize);
             for k in i..j {
-                net[k] = below - card[ca[k] as usize] - card[cb[k] as usize];
+                net[k] = below[i] - card[ca[k] as usize] - card[cb[k] as usize];
             }
             for k in i..j {
-                below += w[k];
                 card[ca[k] as usize] += w[k];
                 card[cb[k] as usize] += w[k];
             }
         }
-        // Down: minus the weight strictly above.
-        let mut above = 0f32;
+        // Down: minus the weight strictly above, likewise.
         let mut card = [0f32; 52];
         for g in self.groups.windows(2).rev() {
             let (i, j) = (g[0] as usize, g[1] as usize);
+            let a = above[n - j];
             for k in i..j {
-                net[k] -= above - card[ca[k] as usize] - card[cb[k] as usize];
+                net[k] -= a - card[ca[k] as usize] - card[cb[k] as usize];
             }
             for k in i..j {
-                above += w[k];
                 card[ca[k] as usize] += w[k];
                 card[cb[k] as usize] += w[k];
             }

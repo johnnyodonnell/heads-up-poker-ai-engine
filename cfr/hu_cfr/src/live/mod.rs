@@ -16,6 +16,7 @@
 //! - Solves are deterministic (fixed iterations, ordered sums), so anything
 //!   missing from the per-hand cache is recomputed exactly.
 
+pub mod gpu;
 pub mod safe;
 pub mod showdown;
 pub mod solver;
@@ -116,6 +117,12 @@ pub struct LiveCfg {
     /// the estimated range at the root (`Solver::set_gadget`); None = pure
     /// Resolve (no estimate at all).
     pub safe_weight: Option<f32>,
+    /// Walk turn solves' river subtrees on the GPU when there is one
+    /// (`gpu`; same results).
+    pub gpu: bool,
+    /// At most this many turn solves on the GPU at once, process-wide; the
+    /// rest run on the CPU (batch evaluations solve many hands at once).
+    pub gpu_slots: usize,
 }
 
 impl Default for LiveCfg {
@@ -146,6 +153,11 @@ impl Default for LiveCfg {
             // solves do no worse against the estimated range).
             safe: SafeMode::Best,
             safe_weight: Some(2.0),
+            gpu: true,
+            // Fastest for batch evaluations: 400 live-turn hands on the box
+            // took 293 s on the CPU alone, 161 s with 2 slots, 124 s with 4,
+            // 151 s with every solve on the GPU.
+            gpu_slots: 4,
         }
     }
 }
@@ -170,6 +182,8 @@ pub struct LiveDebug {
     /// Whether the solve was safe (held every opponent hand to its value
     /// against the table) or trusted the estimated opponent range.
     pub safe: bool,
+    /// Solves run on the GPU (of `solves`).
+    pub gpu_solves: u32,
 }
 
 /// A finished solve: the tree and the average strategy at its current-street
@@ -256,10 +270,16 @@ impl Cache {
     }
 }
 
+/// Turn solves so far, process-wide, and how many ran on the GPU.
+pub static TURN_SOLVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static GPU_SOLVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 #[derive(Default)]
 struct Stats {
     solves: u32,
     ms: u64,
+    /// Of those, solved with the GPU.
+    gpu: u32,
 }
 
 fn board_len(street: Street) -> usize {
@@ -399,6 +419,15 @@ fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: 
     let board = &v.board[..board_len(street)];
     let (strat, ranges, exploitability, safe) = {
         let mut sv = Solver::new(&g, board, ranges, fz, e.live_cfg.parallel);
+        // A GPU slot if one is free (held until the solve is done).
+        let _slot = if e.live_cfg.gpu && street == Street::Turn { gpu::Slot::try_take(e.live_cfg.gpu_slots) } else { None };
+        if _slot.is_some() && sv.use_gpu() {
+            st.gpu += 1;
+            GPU_SOLVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        if street == Street::Turn {
+            TURN_SOLVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         floor_opponent_line(&mut sv, &g, &forced, v.bot, e.live_cfg.opp_line);
         if e.live_cfg.safe != SafeMode::Off {
             let alt = safe::table_values(e, v, &s.actions, k, &sv.ranges[v.bot], sv.boards(), sv.river_cards(), e.live_cfg.safe == SafeMode::Best, g.pot, e.live_cfg.parallel);
@@ -493,6 +522,7 @@ pub fn decide(e: &Engine, v: &View, s: &State, mode: LiveMode, rng: &mut SmallRn
         bot_range: solved.ranges[v.bot].iter().map(|&x| x as f64).sum(),
         opp_range: effective_hands(&solved.ranges[1 - v.bot]),
         safe: solved.safe,
+        gpu_solves: st.gpu,
     });
     let dist = acts.iter().copied().zip(probs).collect();
     Ok(Decision { action, debug: dbg, dist })
@@ -524,6 +554,9 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
     let fz = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
     let t0 = Instant::now();
     let mut sv = Solver::new(&g, &v.board[..board_len(street)], ranges, fz, e.live_cfg.parallel);
+    if e.live_cfg.gpu {
+        sv.use_gpu();
+    }
     floor_opponent_line(&mut sv, &g, &v.actions[k..k + n], v.bot, e.live_cfg.opp_line);
     if e.live_cfg.safe != SafeMode::Off {
         let alt = safe::table_values(e, v, &s.actions, k, &sv.ranges[v.bot], sv.boards(), sv.river_cards(), e.live_cfg.safe == SafeMode::Best, g.pot, e.live_cfg.parallel);
@@ -535,6 +568,86 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
     let ms = t0.elapsed().as_millis() as u64;
     let x = sv.exploitability();
     Ok((ms, x / g.pot.max(1) as f64 * 100.0, g.decisions(), sv.size()))
+}
+
+/// What `gpu_check` measured on one spot.
+#[derive(Debug, Default)]
+pub struct GpuCheck {
+    /// Solve times (ms): the CPU (threads per `LiveCfg::parallel`) and the GPU.
+    pub cpu_ms: u64,
+    pub gpu_ms: u64,
+    /// Largest difference between the two solves' average strategies at
+    /// any of the solve's own decision nodes, any hand, any action.
+    pub max_diff: f64,
+    /// Exploitability of each, in % of the pot.
+    pub cpu_pct: f64,
+    pub gpu_pct: f64,
+}
+
+/// The bot's current decision (a turn spot) solved on the CPU and on the
+/// GPU with `iters` iterations, outside the cache.
+pub fn gpu_check(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<GpuCheck, String> {
+    let s = crate::engine::replay(v)?;
+    let street = s.street;
+    if street != Street::Turn {
+        return Err("GPU solves are turn solves".into());
+    }
+    let k = street_start(&s.actions, street);
+    let n = s.actions.len() - k;
+    let mut st = Stats::default();
+    let key = (v.seed ^ 0x6970_0000_0000_0000, v.bot);
+    let ranges = street_ranges(e, v, &s, mode, key, street, &mut st)?;
+    let mut fz = Vec::new();
+    for (j, a) in v.actions[k..k + n].iter().enumerate() {
+        if a.seat == v.bot {
+            let prev = solve(e, v, &s, mode, key, street, j, &mut st)?;
+            fz.push((j, prev.strat[&prev.g.path[j]].clone()));
+        }
+    }
+    let start = state_at_street(v, k, street)?;
+    let g = subgame::build(&start, &v.actions[k..k + n], &e.live_cfg.turn_menu, &LiveMenu::river_in_turn())?;
+    let fz: Vec<(u32, Vec<f32>)> = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
+    let board = &v.board[..board_len(street)];
+    let solve_on = |gpu: bool| -> Result<(u64, f64, HashMap<u32, Vec<f32>>), String> {
+        let t0 = Instant::now();
+        let mut sv = Solver::new(&g, board, ranges.clone(), fz.clone(), e.live_cfg.parallel);
+        if gpu && !sv.use_gpu() {
+            return Err("no GPU".into());
+        }
+        floor_opponent_line(&mut sv, &g, &v.actions[k..k + n], v.bot, e.live_cfg.opp_line);
+        if e.live_cfg.safe != SafeMode::Off {
+            let alt = safe::table_values(e, v, &s.actions, k, &sv.ranges[v.bot], sv.boards(), sv.river_cards(), e.live_cfg.safe == SafeMode::Best, g.pot, e.live_cfg.parallel);
+            if let Some(alt) = alt {
+                sv.set_gadget(1 - v.bot, alt, e.live_cfg.safe_weight);
+            }
+        }
+        sv.run(iters);
+        let ms = t0.elapsed().as_millis() as u64;
+        let x = sv.exploitability() / g.pot.max(1) as f64 * 100.0;
+        let mut strat = HashMap::new();
+        for (i, nd) in g.nodes.iter().enumerate() {
+            if matches!(nd.kind, Kind::Decision(_)) && !nd.river {
+                strat.insert(i as u32, sv.strategy(i as u32));
+            }
+        }
+        Ok((ms, x, strat))
+    };
+    let (cpu_ms, cpu_pct, a) = solve_on(false)?;
+    use std::sync::atomic::Ordering::Relaxed;
+    let (ns0, n0, k0) = (gpu::PASS_NS.load(Relaxed), gpu::PASSES.load(Relaxed), gpu::kernel_ms());
+    let (gpu_ms, gpu_pct, b) = solve_on(true)?;
+    let (ns, np, km) = (gpu::PASS_NS.load(Relaxed) - ns0, gpu::PASSES.load(Relaxed) - n0, gpu::kernel_ms() - k0);
+    if std::env::var_os("HU_GPU_PROFILE").is_some() {
+        let chances = g.nodes.iter().filter(|n| n.kind == Kind::Chance).count();
+        eprintln!("gpu: {np} passes, {:.1} ms in passes ({:.2} ms each, kernels {:.2} ms), {chances} chance nodes, {} nodes", ns as f64 / 1e6, ns as f64 / 1e6 / np.max(1) as f64, km / np.max(1) as f64, g.nodes.len());
+    }
+    let mut max_diff = 0f64;
+    for (node, x) in &a {
+        for (p, q) in x.iter().zip(&b[node]) {
+            max_diff = max_diff.max((p - q).abs() as f64);
+        }
+    }
+    Ok(GpuCheck { cpu_ms, gpu_ms, max_diff, cpu_pct, gpu_pct })
 }
 
 /// What `safe_check` measured on one spot.

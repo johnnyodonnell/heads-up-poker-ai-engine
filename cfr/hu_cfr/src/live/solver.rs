@@ -25,11 +25,15 @@
 //! floored: every hand takes it at least that often (the opponent's real
 //! actions this street, so the bot never assumes only a few hands take a
 //! line the opponent actually took).
+//!
+//! `use_gpu` moves a turn solve's river subtrees (pass 2) to the GPU
+//! (`super::gpu`), with bit-identical results.
 
 use rayon::prelude::*;
 
 use hu_core::cards::Card;
 
+use super::gpu::GpuRiver;
 use super::showdown::{fold, mask, pair_weight, with_card, Board, H};
 use super::subgame::{Kind, Subgame};
 
@@ -137,8 +141,13 @@ pub struct Solver<'a> {
     /// For a turn solve, the nodes before the river, in id order.
     turn_nodes: Vec<usize>,
     main: Arena,
-    /// `river[i * cards + c]`: chance node i's river with card c.
+    /// `river[i * cards + c]`: chance node i's river with card c (empty
+    /// when the GPU has them).
     river: Vec<Arena>,
+    /// Each chance node's river subtree (node ids) and arena length.
+    spans: Vec<(usize, usize)>,
+    river_lens: Vec<usize>,
+    gpu: Option<GpuRiver>,
     frozen: Vec<Option<Vec<f32>>>,
     /// Per node: (edge, least probability of that edge for every hand).
     floors: Vec<Option<(usize, f32)>>,
@@ -194,6 +203,7 @@ impl<'a> Solver<'a> {
             }
         }
         let mut river = Vec::new();
+        let mut river_lens = Vec::new();
         for &(start, end) in &spans {
             let mut len = 0;
             for i in start..end {
@@ -205,6 +215,7 @@ impl<'a> Solver<'a> {
             for _ in 0..cards.len() {
                 river.push(Arena::new(len));
             }
+            river_lens.push(len);
         }
         let mut fz = vec![None; nn];
         for (node, s) in frozen {
@@ -223,6 +234,9 @@ impl<'a> Solver<'a> {
             turn_nodes,
             main: Arena::new(main_len),
             river,
+            spans,
+            river_lens,
+            gpu: None,
             frozen: fz,
             ranges,
             gadget: None,
@@ -291,7 +305,28 @@ impl<'a> Solver<'a> {
 
     /// Floats of solver state (regrets and strategy sums).
     pub fn size(&self) -> usize {
-        2 * (self.main.regret.len() + self.river.iter().map(|a| a.regret.len()).sum::<usize>())
+        2 * (self.main.regret.len() + self.river_lens.iter().sum::<usize>() * self.cards.len())
+    }
+
+    /// Walk a turn solve's river subtrees on the GPU from now on (call
+    /// before running). False (and nothing changes) for a river solve, a
+    /// build without the GPU, or when the GPU can't be set up.
+    pub fn use_gpu(&mut self) -> bool {
+        if self.cards.is_empty() || self.iterations > 0 || self.gpu.is_some() {
+            return self.gpu.is_some();
+        }
+        match GpuRiver::new(self.g, &self.spans, &self.off, &self.river_lens, &self.boards, &self.cards) {
+            Some(gpu) => {
+                self.gpu = Some(gpu);
+                self.river = Vec::new();
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn on_gpu(&self) -> bool {
+        self.gpu.is_some()
     }
 
     fn walk_root(&mut self, p: usize, mode: Mode, disc: Disc) -> Vec<f32> {
@@ -375,7 +410,21 @@ impl<'a> Solver<'a> {
             zero_card(&mut v, card);
             Some(v)
         };
-        let results: Vec<Option<Vec<f32>>> = if self.parallel {
+        // The GPU returns each chance node's value directly (`gpu_vals`).
+        let mut gpu_vals: Option<Vec<f32>> = None;
+        let results: Vec<Option<Vec<f32>>> = if let Some(gpu) = self.gpu.as_mut() {
+            let nch = chances.len();
+            let (mut rp_all, mut ro_all, mut live) = (vec![0f32; nch * H], vec![0f32; nch * H], vec![0u8; nch]);
+            for (i, &ch) in chances.iter().enumerate() {
+                if !dead_ref[ch] {
+                    live[i] = 1;
+                    rp_all[i * H..(i + 1) * H].copy_from_slice(rp_ref[ch].as_ref().unwrap());
+                    ro_all[i * H..(i + 1) * H].copy_from_slice(ro_ref[ch].as_ref().unwrap());
+                }
+            }
+            gpu_vals = Some(gpu.pass(p, mode == Mode::Best, disc.pos, disc.neg, disc.avg, &rp_all, &ro_all, &live));
+            Vec::new()
+        } else if self.parallel {
             self.river.par_iter_mut().enumerate().map(|(i, ar)| task(i, ar)).collect()
         } else {
             self.river.iter_mut().enumerate().map(|(i, ar)| task(i, ar)).collect()
@@ -392,15 +441,20 @@ impl<'a> Solver<'a> {
             let v = match nd.kind {
                 Kind::Fold(_) | Kind::Showdown => terminal(&cx, i as u32, p, ro[i].as_ref().unwrap(), 0),
                 Kind::Chance => {
-                    let base = self.chance_of[i] * nc;
-                    let mut v = vec![0f32; H];
-                    for r in results[base..base + nc].iter().flatten() {
-                        for (x, y) in v.iter_mut().zip(r) {
-                            *x += y;
+                    let ci = self.chance_of[i];
+                    if let Some(gv) = &gpu_vals {
+                        gv[ci * H..(ci + 1) * H].to_vec()
+                    } else {
+                        let base = ci * nc;
+                        let mut v = vec![0f32; H];
+                        for r in results[base..base + nc].iter().flatten() {
+                            for (x, y) in v.iter_mut().zip(r) {
+                                *x += y;
+                            }
                         }
+                        v.iter_mut().for_each(|x| *x /= RIVERS_PER_PAIR);
+                        v
                     }
-                    v.iter_mut().for_each(|x| *x /= RIVERS_PER_PAIR);
-                    v
                 }
                 Kind::Decision(q) => {
                     let n = nd.n as usize;

@@ -2,8 +2,9 @@
 //! `hu livebench`.
 //!
 //!   hu eval --run NAME [--vs all|station,maniac,...|run:OTHER] [--deals 20000]
-//!       [--stacks full|sampled|200bb] [--seed 1] [--save DIR [--tag NAME]]
+//!       [--from 0] [--stacks full|sampled|200bb] [--seed 1] [--save DIR [--tag NAME]]
 //!       [--no-score] [live flags]
+//!       --from K plays deals K..K+N (to extend a saved match).
 //!       With live solving against a table (`run:OTHER`), each live decision
 //!       is also scored against the table (`hu_cfr::score`): the match prints
 //!       "live - table" directly, and --save also writes it per deal (.adv:
@@ -29,7 +30,11 @@
 //! --safe off|table|best (safe re-solving: hold every opponent hand to its
 //! value against the table, the opponent playing the table or best-responding),
 //! --safe-weight W|resolve (how strictly: weight of the hands that would beat
-//! their table value next to the estimated range; resolve = no estimate).
+//! their table value next to the estimated range; resolve = no estimate),
+//! --gpu on|off (turn solves' river work on the GPU when there is one;
+//! default on, same results), --gpu-slots N (at most N turn solves on the
+//! GPU at once; the rest on the CPU; default 4). `hu livebench --street turn --compare-gpu`
+//! solves each spot both ways.
 //! `run:OTHER` rivals always play their table only (`run:NAME` with the same
 //! run: the run without live solving).
 
@@ -109,6 +114,14 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
     if let Some(w) = flag(args, "--safe-weight") {
         e.live_cfg.safe_weight = if w == "resolve" { None } else { Some(w.parse().expect("--safe-weight W|resolve")) };
     }
+    if let Some(f) = flag(args, "--gpu") {
+        e.live_cfg.gpu = match f.as_str() {
+            "on" => true,
+            "off" => false,
+            x => panic!("--gpu on|off, not {x}"),
+        };
+    }
+    e.live_cfg.gpu_slots = num(args, "--gpu-slots", e.live_cfg.gpu_slots);
     if let Some(f) = flag(args, "--opp-sizes") {
         e.live_cfg.opp_sizes = match f.as_str() {
             "on" => true,
@@ -159,6 +172,7 @@ pub fn compare_cmd(args: &[String]) {
 pub fn eval_cmd(args: &[String]) {
     let run = flag(args, "--run").expect("--run NAME");
     let deals: usize = num(args, "--deals", 20_000);
+    let from: usize = num(args, "--from", 0);
     let seed: u64 = num(args, "--seed", 1);
     let stacks = parse_stacks(flag(args, "--stacks").as_deref());
     let vs = flag(args, "--vs").unwrap_or("all".into());
@@ -175,18 +189,23 @@ pub fn eval_cmd(args: &[String]) {
         names.iter().filter_map(|n| n.strip_prefix("run:")).filter(|r| *r != run).map(|r| (r.to_string(), load_engine(r))).collect();
     for name in names {
         let t = Instant::now();
+        use std::sync::atomic::Ordering::Relaxed;
+        let (turn0, gpu0) = (live::TURN_SOLVES.load(Relaxed), live::GPU_SOLVES.load(Relaxed));
         let opp = match (Bot::parse(&name), name.strip_prefix("run:")) {
             (Some(b), _) => Player::Bot(b),
             (None, Some(r)) if r == run => Player::Engine(&engine, LiveMode::Off),
             (None, Some(r)) => Player::Engine(&rivals.iter().find(|(n, _)| n == r).unwrap().1, LiveMode::Off),
             (None, None) => panic!("unknown bot {name}"),
         };
-        let r = play_match(&me, &opp, deals, stacks, seed, !args.iter().any(|a| a == "--no-score"));
+        let r = play_match(&me, &opp, from, deals, stacks, seed, !args.iter().any(|a| a == "--no-score"));
         if let Some(dir) = flag(args, "--save") {
             // Per-deal results, for `hu compare` against another player's
             // match with the same opponent, seed, deals and stacks.
             let tag = flag(args, "--tag").unwrap_or_else(|| label.replace([' ', '(', ')'], ""));
-            let path = std::path::Path::new(&dir).join(format!("{tag}--vs-{}--{}-{}-{seed}.txt", name.replace(':', "_"), stacks_name(stacks), deals));
+            // Deals from..from+deals; a match starting at 0 is named by its
+            // count alone.
+            let span = if from == 0 { deals.to_string() } else { format!("{from}+{deals}") };
+            let path = std::path::Path::new(&dir).join(format!("{tag}--vs-{}--{}-{span}-{seed}.txt", name.replace(':', "_"), stacks_name(stacks)));
             std::fs::create_dir_all(&dir).expect("create --save dir");
             let write = |p: &std::path::Path, xs: &[f64]| {
                 let text: String = xs.iter().map(|x| format!("{x}\n")).collect();
@@ -196,6 +215,11 @@ pub fn eval_cmd(args: &[String]) {
             if let (Some(g), Some(f)) = (&r.adv_g, &r.adv_full) {
                 write(&path.with_extension("adv"), g);
                 write(&path.with_extension("advfull"), f);
+            }
+            if args.iter().any(|a| a == "--save-plays") {
+                // Per play: chips and scored advantages, seat 0 then seat 1.
+                let text: String = r.per_play.iter().map(|p| format!("{} {} {} {} {} {}\n", p[0], p[1], p[2], p[3], p[4], p[5])).collect();
+                std::fs::write(path.with_extension("plays"), text).expect("write per-play results");
             }
         }
         if let (Some(g), Some(f)) = (&r.adv_g, &r.adv_full) {
@@ -207,8 +231,10 @@ pub fn eval_cmd(args: &[String]) {
                 r.adv.decisions, r.adv.no_range, r.adv.range_misses
             ));
         }
+        let (turns, gpus) = (live::TURN_SOLVES.load(Relaxed) - turn0, live::GPU_SOLVES.load(Relaxed) - gpu0);
+        let solves = if turns > 0 { format!(", {turns} turn solves ({gpus} on the GPU)") } else { String::new() };
         log(format!(
-            "{label} vs {name:<8} {:+8.1} ± {:5.1} bb/100  ({} hands, {:?} stacks, {} decisions, {} fallbacks, {:.1}s)",
+            "{label} vs {name:<8} {:+8.1} ± {:5.1} bb/100  ({} hands, {:?} stacks, {} decisions, {} fallbacks{solves}, {:.1}s)",
             r.bb100,
             r.ci95,
             r.hands,
@@ -358,6 +384,30 @@ pub fn livebench_cmd(args: &[String]) {
                 ld.ms, ld.exploitability_pct, ld.bot_range, ld.opp_range, show(&l.debug)
             );
         }
+    }
+    if args.iter().any(|a| a == "--compare-gpu") {
+        // The same solves on the CPU and the GPU, with the last --iters count.
+        let it = *iters.last().unwrap();
+        let mut rows = Vec::new();
+        for v in &spots {
+            match live::gpu_check(&engine, v, mode, it) {
+                Ok(c) => {
+                    log(format!("  cpu {:5} ms ({:.3}% pot)  gpu {:5} ms ({:.3}% pot)  largest strategy difference {:.2e}", c.cpu_ms, c.cpu_pct, c.gpu_ms, c.gpu_pct, c.max_diff));
+                    rows.push(c);
+                }
+                Err(e) => log(format!("spot skipped: {e}")),
+            }
+        }
+        let mean = |f: &dyn Fn(&live::GpuCheck) -> f64| rows.iter().map(f).sum::<f64>() / rows.len().max(1) as f64;
+        log(format!(
+            "{} spots, {it} iterations: cpu {:.0} ms mean, gpu {:.0} ms mean ({:.1}x); largest strategy difference {:.2e}",
+            rows.len(),
+            mean(&|c| c.cpu_ms as f64),
+            mean(&|c| c.gpu_ms as f64),
+            mean(&|c| c.cpu_ms as f64) / mean(&|c| c.gpu_ms as f64).max(1e-9),
+            rows.iter().map(|c| c.max_diff).fold(0.0, f64::max)
+        ));
+        return;
     }
     if args.iter().any(|a| a == "--check-safe") {
         // Safe vs unsafe solves on each spot, with the last --iters count.

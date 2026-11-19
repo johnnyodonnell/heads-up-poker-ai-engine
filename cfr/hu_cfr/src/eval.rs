@@ -69,6 +69,9 @@ pub struct MatchResult {
     pub adv_g: Option<Vec<f64>>,
     pub adv_full: Option<Vec<f64>>,
     pub adv: Adv,
+    /// Per deal and play (A in seat 0, then in seat 1): A's chips, and its
+    /// scored advantage against the range and the real hand.
+    pub per_play: Vec<[f64; 6]>,
 }
 
 /// Mean and 95% interval (bb/100) of per-deal chip results.
@@ -146,13 +149,15 @@ fn play_hand(players: [&Player; 2], stacks: [i32; 2], button: usize, deck: Vec<u
     }
 }
 
-/// Player A vs player B over `deals` duplicate deals; with `score`, A's live
-/// decisions are scored against its table too (when A solves live and B is a
-/// table).
-pub fn play_match(a: &Player, b: &Player, deals: usize, stacks: Stacks, seed: u64, score: bool) -> MatchResult {
+/// Player A vs player B over `deals` duplicate deals starting at deal index
+/// `from` (deals depend only on the seed and their index, so a match can be
+/// extended later); with `score`, A's live decisions are scored against its
+/// table too (when A solves live and B is a table).
+#[allow(clippy::too_many_arguments)]
+pub fn play_match(a: &Player, b: &Player, from: usize, deals: usize, stacks: Stacks, seed: u64, score: bool) -> MatchResult {
     let c = Counters { decisions: AtomicUsize::new(0), fallbacks: AtomicUsize::new(0) };
     let score = score && scorable(a, b);
-    let rows: Vec<(f64, Adv)> = (0..deals)
+    let rows: Vec<(f64, Adv, [f64; 6])> = (from..from + deals)
         .into_par_iter()
         .map(|d| {
             let dseed = seed ^ (d as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
@@ -170,15 +175,19 @@ pub fn play_match(a: &Player, b: &Player, deals: usize, stacks: Stacks, seed: u6
             let pseed = SmallRng::seed_from_u64(dseed ^ 0x5DEE_CE66_D1CE_4E5B).gen::<u64>();
             let mut total = 0.0;
             let mut adv = Adv::default();
+            let mut plays = [0f64; 6];
             for a_seat in 0..2 {
                 let players: [&Player; 2] = if a_seat == 0 { [a, b] } else { [b, a] };
                 let (x, d) = play_hand(players, st, button, deck.clone(), a_seat, pseed, score, &c);
                 total += x;
+                plays[a_seat * 3] = x;
+                plays[a_seat * 3 + 1] = d.g;
+                plays[a_seat * 3 + 2] = d.full;
                 adv += d;
             }
             adv.g /= 2.0;
             adv.full /= 2.0;
-            (total / 2.0, adv)
+            (total / 2.0, adv, plays)
         })
         .collect();
     let per_deal: Vec<f64> = rows.iter().map(|r| r.0).collect();
@@ -187,6 +196,7 @@ pub fn play_match(a: &Player, b: &Player, deals: usize, stacks: Stacks, seed: u6
     for r in &rows {
         adv += r.1;
     }
+    let per_play = rows.iter().map(|r| r.2).collect();
     let (adv_g, adv_full) = if score { (Some(rows.iter().map(|r| r.1.g).collect()), Some(rows.iter().map(|r| r.1.full).collect())) } else { (None, None) };
-    MatchResult { bb100, ci95, hands: deals * 2, decisions: c.decisions.load(Relaxed), fallbacks: c.fallbacks.load(Relaxed), per_deal, adv_g, adv_full, adv }
+    MatchResult { bb100, ci95, hands: deals * 2, decisions: c.decisions.load(Relaxed), fallbacks: c.fallbacks.load(Relaxed), per_deal, adv_g, adv_full, adv, per_play }
 }

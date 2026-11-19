@@ -3,6 +3,12 @@ name = "hu_cfr"
 version = "0.1.0"
 edition = "2021"
 description = "Abstract betting trees, card abstraction and external-sampling MCCFR for heads-up NLHE"
+build = "build.rs"
+
+[features]
+# Turn solves' river work on the GPU (cuda/river.cu; needs nvcc, CUDA_HOME
+# or /usr/local/cuda).
+gpu = []
 
 [dependencies]
 hu_core = { path = "../hu_core" }

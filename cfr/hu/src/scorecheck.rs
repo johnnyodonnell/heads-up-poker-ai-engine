@@ -19,6 +19,9 @@
 //!    ranks in it (by strength on the board) should be uniform, 10% of spots
 //!    in each tenth.
 //! 4. How long scoring one decision takes, river and turn.
+//!
+//! With `--live river` (and live flags such as `--river-iters`) it checks
+//! the scored identity itself on real spots instead (`live_check`).
 
 use std::time::Instant;
 
@@ -110,10 +113,15 @@ fn playout(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, rng: &mu
 /// served path, replaying the hand from the bot's view), every undealt card
 /// dealt from the real deck, every hand settled by the rules engine.
 fn exact(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64) -> f64 {
+    exact_seat(me, opp, s, stack, seed, 0)
+}
+
+/// `exact` with `me` in seat `bot` (its chips).
+fn exact_seat(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, bot: usize) -> f64 {
     match s.phase {
         Phase::Betting => {
             let seat = s.to_act as usize;
-            let e = if seat == 0 { me } else { opp };
+            let e = if seat == bot { me } else { opp };
             let mut rng = SmallRng::seed_from_u64(0);
             let d = e.decide_mode(&view_of(s, seat, [stack; 2], seed), &mut rng, LiveMode::Off).expect("decide");
             let total: f64 = d.dist.iter().map(|x| x.1).sum();
@@ -123,20 +131,20 @@ fn exact(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64) -> f64 {
                 .map(|&(a, p)| {
                     let mut t = s.clone();
                     t.apply(a);
-                    p / total * exact(me, opp, &t, stack, seed)
+                    p / total * exact_seat(me, opp, &t, stack, seed, bot)
                 })
                 .sum()
         }
         Phase::StreetComplete => {
             if is_runout(s) {
                 let mut rng = SmallRng::seed_from_u64(0);
-                return expected_stacks(s, &mut rng)[0] - stack as f64;
+                return expected_stacks(s, &mut rng)[bot] - stack as f64;
             }
             let folded = s.players.iter().any(|p| p.status == hu_core::rules::Status::Folded);
             if folded || s.street == Street::River {
                 let mut t = s.clone();
                 t.advance_street();
-                return exact(me, opp, &t, stack, seed);
+                return exact_seat(me, opp, &t, stack, seed, bot);
             }
             let cards = s.deck.clone();
             cards
@@ -146,13 +154,141 @@ fn exact(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64) -> f64 {
                     t.deck.retain(|&x| x != c);
                     t.deck.push(c);
                     t.advance_street();
-                    exact(me, opp, &t, stack, seed)
+                    exact_seat(me, opp, &t, stack, seed, bot)
                 })
                 .sum::<f64>()
                 / cards.len() as f64
         }
-        _ => (s.players[0].stack - stack) as f64,
+        _ => (s.players[bot].stack - stack) as f64,
     }
+}
+
+/// Like `exact`, with seat 0 playing `mode` (live where it covers the
+/// street) instead of its table. River spots only (no cards left to deal).
+fn exact_mode(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, mode: LiveMode, bot: usize) -> f64 {
+    match s.phase {
+        Phase::Betting => {
+            let seat = s.to_act as usize;
+            let (e, m) = if seat == bot { (me, mode) } else { (opp, LiveMode::Off) };
+            let mut rng = SmallRng::seed_from_u64(0);
+            let d = e.decide_mode(&view_of(s, seat, [stack; 2], seed), &mut rng, m).expect("decide");
+            let total: f64 = d.dist.iter().map(|x| x.1).sum();
+            d.dist
+                .iter()
+                .filter(|x| x.1 > 0.0)
+                .map(|&(a, p)| {
+                    let mut t = s.clone();
+                    t.apply(a);
+                    p / total * exact_mode(me, opp, &t, stack, seed, mode, bot)
+                })
+                .sum()
+        }
+        Phase::StreetComplete => {
+            assert_eq!(s.street, Street::River, "river spots only");
+            let mut t = s.clone();
+            t.advance_street();
+            exact_mode(me, opp, &t, stack, seed, mode, bot)
+        }
+        _ => (s.players[bot].stack - stack) as f64,
+    }
+}
+
+/// The expected sum of seat 0's scored advantages (real hand, range) over
+/// its play in `mode` from `s` (river spots only).
+fn adv_tree(me: &Engine, opp: &Engine, s: &State, init: &State, stack: i32, seed: u64, mode: LiveMode, bot: usize) -> (f64, f64) {
+    match s.phase {
+        Phase::Betting => {
+            let seat = s.to_act as usize;
+            let (e, m) = if seat == bot { (me, mode) } else { (opp, LiveMode::Off) };
+            let mut rng = SmallRng::seed_from_u64(0);
+            let d = e.decide_mode(&view_of(s, seat, [stack; 2], seed), &mut rng, m).expect("decide");
+            let mut here = (0.0, 0.0);
+            if seat == bot && mode.covers(s.street) {
+                let a = advantage(me, opp, s, init, bot, [stack; 2], seed, &d.dist);
+                here = (a.full, a.g);
+            }
+            let total: f64 = d.dist.iter().map(|x| x.1).sum();
+            for &(a, p) in d.dist.iter().filter(|x| x.1 > 0.0) {
+                let mut t = s.clone();
+                t.apply(a);
+                let (f, g) = adv_tree(me, opp, &t, init, stack, seed, mode, bot);
+                here.0 += p / total * f;
+                here.1 += p / total * g;
+            }
+            here
+        }
+        _ => (0.0, 0.0),
+    }
+}
+
+/// `--live river`: the performance-difference identity on real spots, exactly:
+/// at seat 0's first river decision, (its expected result playing live −
+/// playing its table) must equal the expected sum of its scored advantages
+/// against the opponent's real hand, and on average over spots the range
+/// version too.
+fn live_check(me: &Engine, opp: &Engine, n: usize, stack: i32, seed: u64, mode: LiveMode) {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut spots = Vec::new();
+    let mut bots = Vec::new();
+    while spots.len() < n {
+        let mut deck: Vec<u8> = (0..52).collect();
+        deck.shuffle(&mut rng);
+        let mut s = State::new_table([stack; 2]);
+        s.button = rng.gen_range(0..2);
+        s.start_hand(deck);
+        let init = s.clone();
+        let hseed = rng.gen::<u64>();
+        // The bot sits in seat 0 or 1, alternately.
+        let bot = spots.len() % 2;
+        loop {
+            match s.phase {
+                Phase::Betting => {
+                    let seat = s.to_act as usize;
+                    if seat == bot && s.street == Street::River {
+                        spots.push(Spot { s: s.clone(), init: init.clone(), seed: hseed });
+                        bots.push(bot);
+                        break;
+                    }
+                    let e = if seat == bot { me } else { opp };
+                    let d = e.decide_mode(&view_of(&s, seat, [stack; 2], hseed), &mut rng, LiveMode::Off).expect("decide");
+                    s.apply(d.action);
+                }
+                Phase::StreetComplete => {
+                    if is_runout(&s) {
+                        break;
+                    }
+                    s.advance_street();
+                }
+                _ => break,
+            }
+        }
+    }
+    let rows: Vec<(f64, f64, f64)> = spots
+        .par_iter()
+        .zip(&bots)
+        .map(|(sp, &bot)| {
+            let vb = exact_mode(me, opp, &sp.s, stack, sp.seed, mode, bot);
+            let va = exact_seat(me, opp, &sp.s, stack, sp.seed, bot);
+            let (f, g) = adv_tree(me, opp, &sp.s, &sp.init, stack, sp.seed, mode, bot);
+            (vb - va, f, g)
+        })
+        .collect();
+    let worst = rows.iter().map(|r| (r.0 - r.1).abs() / r.0.abs().max(1.0)).fold(0f64, f64::max);
+    let bad = rows.iter().filter(|r| (r.0 - r.1).abs() > 1e-6 * r.0.abs().max(1.0)).count();
+    log(format!("live (V_live - V_table) vs expected scored sum (real hand) on {} river spots (bot in either seat): largest relative difference {worst:.2e}, {bad} above 1e-6 (should be 0)", rows.len()));
+    let k = rows.len() as f64;
+    let d: Vec<f64> = rows.iter().map(|r| r.0 - r.2).collect();
+    let m = d.iter().sum::<f64>() / k;
+    let sd = (d.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (k - 1.0)).sqrt();
+    let mean = |f: &dyn Fn(&(f64, f64, f64)) -> f64| rows.iter().map(f).sum::<f64>() / k;
+    log(format!(
+        "  means per spot (chips): true {:+.4}, scored real hand {:+.4}, scored range {:+.4}; true - range {:+.4} ± {:.4} (95%, should cover 0)",
+        mean(&|r| r.0),
+        mean(&|r| r.1),
+        mean(&|r| r.2),
+        m,
+        1.96 * sd / k.sqrt()
+    ));
 }
 
 fn strength(hole: [Card; 2], board: &[Card]) -> u32 {
@@ -169,9 +305,18 @@ pub fn scorecheck_cmd(args: &[String]) {
     let stack: i32 = num(args, "--stack", 400);
     let seed: u64 = num(args, "--seed", 3);
     let verbose = args.iter().any(|a| a == "--verbose");
-    let me = load_engine(&run);
+    let mut me = load_engine(&run);
+    crate::play::live_flags(args, &mut me);
+    me.live_cfg.parallel = false;
+    let live = me.live;
+    me.live = LiveMode::Off;
+    let me = me;
     let other = if opp_run == run { None } else { Some(load_engine(&opp_run)) };
     let opp = other.as_ref().unwrap_or(&me);
+    if live != LiveMode::Off {
+        live_check(&me, opp, n, stack, seed, live);
+        return;
+    }
     let t0 = Instant::now();
     let spots = spots(&me, opp, n, stack, seed);
     log(format!("{} spots ({} river) in {:.1}s", spots.len(), spots.iter().filter(|x| x.s.street == Street::River).count(), t0.elapsed().as_secs_f64()));

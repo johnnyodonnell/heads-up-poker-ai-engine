@@ -8,6 +8,11 @@ description = "The CFR engine's command line: build abstractions, train, export,
 name = "hu"
 path = "src/main.rs"
 
+[features]
+# The box has the GPU; build with --no-default-features elsewhere.
+default = ["gpu"]
+gpu = ["hu_cfr/gpu"]
+
 [dependencies]
 hu_core = { path = "../hu_core" }
 hu_cfr = { path = "../hu_cfr" }
