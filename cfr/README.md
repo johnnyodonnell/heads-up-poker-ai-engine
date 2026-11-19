@@ -200,8 +200,9 @@ held: they were badly overconfident, predicting those hands worse than
 estimates are now hedged and fit to those logs (`LiveCfg`: +0.33 nats per
 hand, calibrated), and safe re-solving makes the solve hold up when the
 estimate is still wrong. Slumbot itself is too noisy to measure a few
-bb/100 in a day of play, so the engine is now tested against internal
-opponents, with Slumbot as a final check.
+bb/100 in a day of play, and its rate limits made long runs unreliable, so
+it is no longer part of testing: the engine is tested only against bots
+built here (the earlier tables and the scripted bots).
 
 ### The test panel
 
