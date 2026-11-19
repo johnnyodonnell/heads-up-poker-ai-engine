@@ -494,7 +494,8 @@ pub fn decide(e: &Engine, v: &View, s: &State, mode: LiveMode, rng: &mut SmallRn
         opp_range: effective_hands(&solved.ranges[1 - v.bot]),
         safe: solved.safe,
     });
-    Ok(Decision { action, debug: dbg })
+    let dist = acts.iter().copied().zip(probs).collect();
+    Ok(Decision { action, debug: dbg, dist })
 }
 
 /// One solve of the bot's current decision with `iters` iterations, outside

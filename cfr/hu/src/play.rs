@@ -2,7 +2,12 @@
 //! `hu livebench`.
 //!
 //!   hu eval --run NAME [--vs all|station,maniac,...|run:OTHER] [--deals 20000]
-//!       [--stacks full|sampled|200bb] [--seed 1] [--save DIR [--tag NAME]] [live flags]
+//!       [--stacks full|sampled|200bb] [--seed 1] [--save DIR [--tag NAME]]
+//!       [--no-score] [live flags]
+//!       With live solving against a table (`run:OTHER`), each live decision
+//!       is also scored against the table (`hu_cfr::score`): the match prints
+//!       "live - table" directly, and --save also writes it per deal (.adv:
+//!       against the opponent's range; .advfull: against its real hand).
 //!   hu compare BASE.txt OTHER.txt ...   paired differences between saved
 //!       matches against the same opponent (same seed, deals, stacks)
 //!   hu probe --run NAME [--stack 200]   preflop charts: the small blind's first
@@ -176,15 +181,31 @@ pub fn eval_cmd(args: &[String]) {
             (None, Some(r)) => Player::Engine(&rivals.iter().find(|(n, _)| n == r).unwrap().1, LiveMode::Off),
             (None, None) => panic!("unknown bot {name}"),
         };
-        let r = play_match(&me, &opp, deals, stacks, seed);
+        let r = play_match(&me, &opp, deals, stacks, seed, !args.iter().any(|a| a == "--no-score"));
         if let Some(dir) = flag(args, "--save") {
             // Per-deal results, for `hu compare` against another player's
             // match with the same opponent, seed, deals and stacks.
             let tag = flag(args, "--tag").unwrap_or_else(|| label.replace([' ', '(', ')'], ""));
             let path = std::path::Path::new(&dir).join(format!("{tag}--vs-{}--{}-{}-{seed}.txt", name.replace(':', "_"), stacks_name(stacks), deals));
             std::fs::create_dir_all(&dir).expect("create --save dir");
-            let text: String = r.per_deal.iter().map(|x| format!("{x}\n")).collect();
-            std::fs::write(&path, text).expect("write per-deal results");
+            let write = |p: &std::path::Path, xs: &[f64]| {
+                let text: String = xs.iter().map(|x| format!("{x}\n")).collect();
+                std::fs::write(p, text).expect("write per-deal results");
+            };
+            write(&path, &r.per_deal);
+            if let (Some(g), Some(f)) = (&r.adv_g, &r.adv_full) {
+                write(&path.with_extension("adv"), g);
+                write(&path.with_extension("advfull"), f);
+            }
+        }
+        if let (Some(g), Some(f)) = (&r.adv_g, &r.adv_full) {
+            let (gm, gc) = hu_cfr::eval::summarize(g);
+            let (fm, fc) = hu_cfr::eval::summarize(f);
+            let (dm, dc) = hu_cfr::eval::compare(g, f);
+            log(format!(
+                "{label} vs {name:<8} scored live - table: {gm:+7.2} ± {gc:5.2} bb/100 (opponent's range), {fm:+7.2} ± {fc:5.2} (its real hand; difference {dm:+.2} ± {dc:.2}); {} decisions scored, {} without a range, {} range misses",
+                r.adv.decisions, r.adv.no_range, r.adv.range_misses
+            ));
         }
         log(format!(
             "{label} vs {name:<8} {:+8.1} ± {:5.1} bb/100  ({} hands, {:?} stacks, {} decisions, {} fallbacks, {:.1}s)",

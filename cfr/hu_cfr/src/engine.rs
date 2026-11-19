@@ -14,7 +14,11 @@
 //!
 //! When the abstract tree can't follow the real hand (a fourth raise on one
 //! street, a real raise mapped to an abstract all-in, ...) the engine falls
-//! back to a simple equity heuristic and says so in the debug output.
+//! back to a simple equity heuristic and says so in the debug output. The
+//! heuristic is deterministic (exact equity on the turn and river, seeded
+//! Monte Carlo before), so every decision's action probabilities are known
+//! exactly (`table_play`, `table_play_all`): what advantage scoring
+//! (`crate::score`) needs.
 
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -25,8 +29,8 @@ use hu_core::hand_eval::eval7;
 use hu_core::rules::{Action, ActionType, Legal, Phase, State, Street};
 
 use crate::abs::Abstraction;
-use crate::game::{Act, MAX_ACTIONS, TERMINAL};
-use crate::live::showdown::{holes, H};
+use crate::game::{Act, TreeGame, MAX_ACTIONS, TERMINAL};
+use crate::live::showdown::{hand, holes, Board, H};
 use crate::live::{Cache, LiveCfg, LiveDebug, LiveMode};
 use crate::strategy::Strategy;
 
@@ -87,6 +91,17 @@ pub struct Debug {
 
 pub struct Decision {
     pub action: Action,
+    pub debug: Debug,
+    /// The probability of each real action the decision sampled from
+    /// (summing to 1 up to rounding); the chosen action is one of them.
+    pub dist: Vec<(Action, f64)>,
+}
+
+/// A table decision before sampling.
+pub struct TablePlay {
+    /// The probability of each real action (abstract actions that become the
+    /// same real action merged), in the table's order.
+    pub dist: Vec<(Action, f64)>,
     pub debug: Debug,
 }
 
@@ -297,7 +312,7 @@ fn hand_seed(seed: u64, i: usize) -> u64 {
     seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
-/// Equity against a random hand (Monte Carlo), for the fallback.
+/// Equity against a random hand (Monte Carlo).
 fn equity_vs_random(hole: [Card; 2], board: &[Card], rng: &mut SmallRng) -> f64 {
     let mut dead = 0u64;
     for &c in hole.iter().chain(board) {
@@ -333,6 +348,109 @@ fn equity_vs_random(hole: [Card; 2], board: &[Card], rng: &mut SmallRng) -> f64 
     won / n as f64
 }
 
+/// Every hand's exact equity against a random hand (ties half) on a 4- or
+/// 5-card board, `holes()` order; hands touching the board get 0.
+pub fn equity_all(board: &[Card]) -> Vec<f64> {
+    assert!(board.len() == 4 || board.len() == 5, "equity_all needs the turn or river");
+    let mut any = vec![1f32; H];
+    crate::live::showdown::mask(&mut any, board);
+    let mut acc = vec![0f64; H];
+    let mut out = vec![0f32; H];
+    let rivers: Vec<Card> = if board.len() == 5 { vec![board[4]] } else { (0..52u8).filter(|c| !board.contains(c)).collect() };
+    for &r in &rivers {
+        let cards = [board[0], board[1], board[2], board[3], r];
+        let mut w = any.clone();
+        crate::live::showdown::mask(&mut w, &[r]);
+        Board::new(cards).showdown(&w, 1.0, &mut out);
+        // 990 opponent hands avoid each hand and the five board cards.
+        for (h, &[a, b]) in holes().iter().enumerate() {
+            if w[h] != 0.0 && a != r && b != r {
+                acc[h] += 0.5 + out[h] as f64 / (2.0 * 990.0);
+            }
+        }
+    }
+    // Each hand off the 4-card board meets 46 river cards.
+    let n = if board.len() == 5 { 1.0 } else { 46.0 };
+    acc.iter_mut().for_each(|x| *x /= n);
+    acc
+}
+
+/// The fallback's equity for `hole`: exact on the turn and river, Monte
+/// Carlo seeded by the hand (deterministic) before.
+fn fallback_equity(hole: [Card; 2], board: &[Card], seed: u64, n_actions: usize) -> f64 {
+    if board.len() >= 4 {
+        equity_all(board)[hand(hole)]
+    } else {
+        let mut rng = SmallRng::seed_from_u64(hand_seed(seed, 0x1_0000 + n_actions) ^ hand(hole) as u64);
+        equity_vs_random(hole, board, &mut rng)
+    }
+}
+
+/// The equity heuristic's action.
+fn fallback_action(eq: f64, legal: &Legal, s: &State) -> Action {
+    let pot_total = s.pot + s.players.iter().map(|p| p.bet).sum::<i32>();
+    let to_call = legal.to_call;
+    if to_call > 0 {
+        let odds = to_call as f64 / (pot_total + to_call) as f64;
+        if eq > 0.8 && legal.can_raise {
+            Action::new(ActionType::AllIn)
+        } else if eq >= odds + 0.05 {
+            Action::new(ActionType::Call)
+        } else {
+            Action::new(ActionType::Fold)
+        }
+    } else if eq > 0.75 && legal.can_raise {
+        let me = &s.players[s.to_act as usize];
+        let pac = pot_total + (s.current_bet - me.bet);
+        to_real(&Act::Bet { to: 0, frac: 1.0 }, legal, s.current_bet, pac)
+    } else {
+        Action::new(ActionType::Check)
+    }
+}
+
+/// The table's node at the current decision of `s`: the abstract tree walked
+/// along the real history, each real bet/raise translated (deterministically
+/// per hand: `seed`); or why the table can't play it (the equity fallback).
+/// `path` gets (seat, abstract action) per step.
+fn table_node_at(tree: &TreeGame, seed: u64, button: usize, s: &State, path: &mut Vec<(usize, String)>) -> Result<u32, &'static str> {
+    let mut node = 0u32;
+    for (i, ha) in s.actions.iter().enumerate() {
+        let nd = &tree.nodes[node as usize];
+        if nd.player == TERMINAL {
+            return Err("the abstract hand ended before the real one");
+        }
+        if nd.player as usize != abs_player(ha.seat, button) || nd.street as usize != ha.street.index() {
+            return Err("the abstract and real betting diverged");
+        }
+        let acts = tree.actions(nd);
+        let mut trng = SmallRng::seed_from_u64(hand_seed(seed, i));
+        let k = translate(acts, ha, &mut trng);
+        path.push((ha.seat, acts[k].label()));
+        node = tree.children(nd)[k];
+    }
+    let nd = &tree.nodes[node as usize];
+    if nd.player == TERMINAL {
+        return Err("the abstract hand already ended");
+    }
+    if nd.player as usize != abs_player(s.to_act as usize, button) || nd.street as usize != s.street.index() {
+        return Err("the abstract and real turns diverged");
+    }
+    Ok(node)
+}
+
+/// The action `x` (uniform in [0, 1)) picks from a distribution.
+pub fn sample(dist: &[(Action, f64)], x: f64) -> Action {
+    let total: f64 = dist.iter().map(|m| m.1).sum();
+    let mut x = x * total;
+    for (a, w) in dist {
+        if x < *w {
+            return *a;
+        }
+        x -= w;
+    }
+    dist.last().expect("no actions").0
+}
+
 impl Engine {
     /// The strategy whose stack is nearest `eff` chips in ratio.
     pub fn pick(&self, eff: i32) -> &Strategy {
@@ -358,7 +476,23 @@ impl Engine {
         if mode.covers(s.street) {
             return crate::live::decide(self, v, &s, mode, rng);
         }
-        let eff = v.stacks[0].min(v.stacks[1]);
+        let TablePlay { dist, mut debug } = self.table_play(&s, v.hole, v.stacks, v.button, v.seed)?;
+        let action = sample(&dist, rng.gen::<f64>());
+        if debug.fallback.is_none() {
+            debug.chosen = action_label(&action);
+        }
+        Ok(Decision { action, debug, dist })
+    }
+
+    /// The table's play at real state `s` for the seat to act holding
+    /// `hole`, before sampling (what `decide` samples from): `stacks` are
+    /// the hand's starting stacks, `seed` its seed (translation, fallback).
+    pub fn table_play(&self, s: &State, hole: [Card; 2], stacks: [i32; 2], button: usize, seed: u64) -> Result<TablePlay, String> {
+        if s.phase != Phase::Betting || s.to_act < 0 {
+            return Err("no decision at this state".into());
+        }
+        let seat = s.to_act as usize;
+        let eff = stacks[0].min(stacks[1]);
         let strat = self.pick(eff);
         let tree = &strat.tree;
         let mut dbg = Debug {
@@ -367,84 +501,37 @@ impl Engine {
             street: street_name(s.street).into(),
             ..Debug::default()
         };
-        let who = |seat: usize| if seat == v.bot { "bot" } else { "you" };
-
-        // Walk the abstract tree along the real history.
-        let mut node = 0u32;
-        for (i, ha) in s.actions.iter().enumerate() {
-            let nd = &tree.nodes[node as usize];
-            if nd.player == TERMINAL {
-                dbg.fallback = Some("the abstract hand ended before the real one".into());
-                break;
-            }
-            if nd.player as usize != abs_player(ha.seat, v.button) || nd.street as usize != ha.street.index() {
-                dbg.fallback = Some("the abstract and real betting diverged".into());
-                break;
-            }
-            let acts = tree.actions(nd);
-            let mut trng = SmallRng::seed_from_u64(hand_seed(v.seed, i));
-            let k = translate(acts, ha, &mut trng);
-            dbg.path.push(format!("{}: {}", who(ha.seat), acts[k].label()));
-            node = tree.children(nd)[k];
-        }
-        let nd = &tree.nodes[node as usize];
-        if dbg.fallback.is_none() {
-            if nd.player == TERMINAL {
-                dbg.fallback = Some("the abstract hand already ended".into());
-            } else if nd.player as usize != abs_player(v.bot, v.button) || nd.street as usize != s.street.index() {
-                dbg.fallback = Some("the abstract and real turns diverged".into());
-            }
-        }
-
+        let mut path = Vec::new();
+        let spot = table_node_at(tree, seed, button, s, &mut path);
+        dbg.path = path.into_iter().map(|(q, l)| format!("{}: {l}", if q == seat { "bot" } else { "you" })).collect();
         let legal = s.legal().ok_or("no legal actions")?;
-        let me = &s.players[v.bot];
+        let node = match spot {
+            Ok(node) => node,
+            Err(why) => {
+                dbg.fallback = Some(why.into());
+                let eq = fallback_equity(hole, &s.community, seed, s.actions.len());
+                let action = fallback_action(eq, &legal, s);
+                dbg.chosen = format!("{} (equity {:.0}%)", action_label(&action), eq * 100.0);
+                return Ok(TablePlay { dist: vec![(action, 1.0)], debug: dbg });
+            }
+        };
+        let nd = &tree.nodes[node as usize];
+        let me = &s.players[seat];
         let pot_total = s.pot + s.players.iter().map(|p| p.bet).sum::<i32>();
         let pac = pot_total + (s.current_bet - me.bet);
-
-        if dbg.fallback.is_some() {
-            let eq = equity_vs_random(v.hole, &s.community, rng);
-            let to_call = legal.to_call;
-            let action = if to_call > 0 {
-                let odds = to_call as f64 / (pot_total + to_call) as f64;
-                if eq > 0.8 && legal.can_raise {
-                    Action::new(ActionType::AllIn)
-                } else if eq >= odds + 0.05 {
-                    Action::new(ActionType::Call)
-                } else {
-                    Action::new(ActionType::Fold)
-                }
-            } else if eq > 0.75 && legal.can_raise {
-                to_real(&Act::Bet { to: 0, frac: 1.0 }, &legal, s.current_bet, pac)
-            } else {
-                Action::new(ActionType::Check)
-            };
-            dbg.chosen = format!("{} (equity {:.0}%)", action_label(&action), eq * 100.0);
-            return Ok(Decision { action, debug: dbg });
-        }
-
-        let bucket = self.abs.bucket(s.street.index(), v.hole, &s.community);
+        let bucket = self.abs.bucket(s.street.index(), hole, &s.community);
         let n = nd.n as usize;
         let mut p = [0f64; MAX_ACTIONS];
         strat.probs(node, bucket, &mut p[..n]);
         let acts = tree.actions(nd);
-        let mut merged: Vec<(Action, f64)> = Vec::new();
+        let mut dist: Vec<(Action, f64)> = Vec::new();
         for a in 0..n {
             let real = to_real(&acts[a], &legal, s.current_bet, pac);
             dbg.options.push(Opt { label: acts[a].label(), action: action_label(&real), prob: p[a] });
-            match merged.iter_mut().find(|m| m.0 == real) {
+            match dist.iter_mut().find(|m| m.0 == real) {
                 Some(m) => m.1 += p[a],
-                None => merged.push((real, p[a])),
+                None => dist.push((real, p[a])),
             }
-        }
-        let total: f64 = merged.iter().map(|m| m.1).sum();
-        let mut x = rng.gen::<f64>() * total;
-        let mut action = merged.last().unwrap().0;
-        for (a, w) in &merged {
-            if x < *w {
-                action = *a;
-                break;
-            }
-            x -= w;
         }
         dbg.bucket = Some(bucket);
         dbg.bucket_label = Some(if s.street == Street::Preflop {
@@ -453,8 +540,121 @@ impl Engine {
             format!("hand group {} of {} (0 = weakest)", bucket, self.abs.buckets()[s.street.index()])
         });
         dbg.node = Some(node);
-        dbg.chosen = action_label(&action);
-        Ok(Decision { action, debug: dbg })
+        Ok(TablePlay { dist, debug: dbg })
+    }
+
+    /// `table_play` for every hand at once (`holes()` order): the real
+    /// options of the seat to act at `s` and each hand's probability of each
+    /// (option-major: `p[o * H + h]`). Hands with weight 0 in `w` are
+    /// skipped (all 0); so must be every hand touching the board.
+    pub fn table_play_all(&self, s: &State, stacks: [i32; 2], button: usize, seed: u64, w: &[f64]) -> (Vec<Action>, Vec<f64>) {
+        let seat = s.to_act as usize;
+        let strat = self.pick(stacks[0].min(stacks[1]));
+        let tree = &strat.tree;
+        let legal = s.legal().expect("no legal actions");
+        let hs = holes();
+        let mut opts: Vec<Action> = Vec::new();
+        let index_of = |a: Action, opts: &mut Vec<Action>| match opts.iter().position(|x| *x == a) {
+            Some(i) => i,
+            None => {
+                opts.push(a);
+                opts.len() - 1
+            }
+        };
+        match table_node_at(tree, seed, button, s, &mut Vec::new()) {
+            Err(_) => {
+                // The fallback, hand by hand.
+                let board = &s.community;
+                let exact = if board.len() >= 4 { Some(equity_all(board)) } else { None };
+                let mut pick = vec![usize::MAX; H];
+                for h in 0..H {
+                    if w[h] == 0.0 {
+                        continue;
+                    }
+                    let eq = match &exact {
+                        Some(e) => e[h],
+                        None => fallback_equity(hs[h], board, seed, s.actions.len()),
+                    };
+                    pick[h] = index_of(fallback_action(eq, &legal, s), &mut opts);
+                }
+                let mut p = vec![0f64; opts.len() * H];
+                for h in 0..H {
+                    if pick[h] != usize::MAX {
+                        p[pick[h] * H + h] = 1.0;
+                    }
+                }
+                (opts, p)
+            }
+            Ok(node) => {
+                let nd = &tree.nodes[node as usize];
+                let me = &s.players[seat];
+                let pot_total = s.pot + s.players.iter().map(|p| p.bet).sum::<i32>();
+                let pac = pot_total + (s.current_bet - me.bet);
+                let n = nd.n as usize;
+                let acts = tree.actions(nd);
+                let to: Vec<usize> = (0..n).map(|a| index_of(to_real(&acts[a], &legal, s.current_bet, pac), &mut opts)).collect();
+                let mut p = vec![0f64; opts.len() * H];
+                let mut q = [0f64; MAX_ACTIONS];
+                let st = s.street.index();
+                for h in 0..H {
+                    if w[h] == 0.0 {
+                        continue;
+                    }
+                    strat.probs(node, self.abs.bucket(st, hs[h], &s.community), &mut q[..n]);
+                    for a in 0..n {
+                        p[to[a] * H + h] += q[a];
+                    }
+                }
+                (opts, p)
+            }
+        }
+    }
+
+    /// Each hand's likelihood (`holes()` order) of seat `seat` having played
+    /// its actions in `actions` the way this engine's table plays: the
+    /// product over them of the probability of the real action it took
+    /// (`table_play_all`), replayed from `init` (the hand's state before any
+    /// action, with its real deck). Hands touching `dead` get 0. None when
+    /// one of the actions isn't one the table could have taken.
+    #[allow(clippy::too_many_arguments)]
+    pub fn table_likelihood(&self, init: &State, actions: &[hu_core::rules::HandAction], seat: usize, stacks: [i32; 2], button: usize, seed: u64, dead: &[Card]) -> Option<Vec<f64>> {
+        let hs = holes();
+        let mut w: Vec<f64> = hs.iter().map(|&[a, b]| if dead.contains(&a) || dead.contains(&b) { 0.0 } else { 1.0 }).collect();
+        let mut s = init.clone();
+        for ha in actions {
+            while s.phase == Phase::StreetComplete {
+                s.advance_street();
+            }
+            let act = match ha.kind {
+                ActionType::Bet | ActionType::Raise => Action::to(ha.kind, ha.to),
+                k => Action::new(k),
+            };
+            if ha.seat == seat {
+                for (h, x) in w.iter_mut().enumerate() {
+                    let [a, b] = hs[h];
+                    if s.community.contains(&a) || s.community.contains(&b) {
+                        *x = 0.0;
+                    }
+                }
+                let (opts, p) = self.table_play_all(&s, stacks, button, seed, &w);
+                let took: Vec<usize> = (0..opts.len())
+                    .filter(|&o| {
+                        let mut t = s.clone();
+                        t.apply(opts[o]);
+                        let r = t.actions.last().unwrap();
+                        (r.kind, r.to) == (ha.kind, ha.to)
+                    })
+                    .collect();
+                if took.is_empty() {
+                    return None;
+                }
+                for (h, x) in w.iter_mut().enumerate() {
+                    *x *= took.iter().map(|&o| p[o * H + h]).sum::<f64>();
+                }
+            }
+            s.apply(act);
+        }
+        Some(w)
     }
 
     /// Load an abstraction and every strategy directory under `dir`.

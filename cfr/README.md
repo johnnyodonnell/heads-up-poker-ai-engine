@@ -24,11 +24,13 @@ hu_cfr/           the engine:
   strategy.rs       exported strategies (1 byte per action)
   engine.rs         play time: replay, translation, action mapping
   eval.rs, bots.rs  matches against scripted bots (duplicate, paired deals)
+  score.rs          advantage scoring: live solving's edge over the table,
+                    scored decision by decision
   live/             live solving: subgame tree, vectorized DCFR, showdowns,
                     safe re-solving against the table's values
   pushfold.rs, toy.rs, br.rs   solver validation games and exact best response
 hu/               the `hu` command line (abstraction, train, export, eval, compare,
-                  probe, livebench, rangecheck, serve, tree, pushfold)
+                  probe, livebench, rangecheck, scorecheck, serve, tree, pushfold)
 scripts/          TS run with tsx: rule scenario checks, parity fixture dumper
 fixtures/         parity fixtures dumped from the TS engine (gitignored)
 box_env.sh        environment for the box (sourced by everything below)
@@ -178,6 +180,7 @@ cargo test --release -p hu_cfr live         # solver unit tests (below)
 hu livebench --run v1c --street turn --spots 20 --iters 150,300   # time and convergence on real spots
 hu livebench --run v1c --street river --spots 40 --iters 400 --check-safe   # safe vs unsafe solves
 hu rangecheck --run v1c --opp-run v1a       # how well the table's range estimates fit another run's play
+hu scorecheck --run v1c --opp-run v1a --spots 3000   # checks of advantage scoring on real spots
 hu compare A.txt B.txt                      # paired difference of two saved matches
 ./panel.sh; ./panel_report.sh               # the test panel (below) and its paired results
 ```
