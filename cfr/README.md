@@ -391,6 +391,34 @@ beat the table alone?
   zero; against neither opponent does the 95% interval lie entirely below
   zero; and it still beats every scripted bot (95% interval above zero).
 
+**Live river passes all three.** Live river minus the table, scored, 50,000
+deals per opponent (100,000 hands), bb/100:
+
+| Opponent | Scored | Paired (cross-check) |
+|---|---|---|
+| v1c | **+3.3 ± 1.3** | +3.1 ± 3.7 |
+| v1a | **+1.5 ± 1.4** | −0.6 ± 4.5 |
+| Pooled | **+2.4 ± 1.0** | |
+
+Both intervals lie above zero, and so does the pooled one: live solving of
+the river plus the table beats the table alone. (The validation runs, on
+other deals and before the GPU change, gave +2.3 ± 1.4 and −0.2 ± 1.4.)
+
+Against the scripted bots (5,000 deals each), live river still wins big
+against all of them, and on the same deals compared with the table:
+
+| Bot | Table | Live river | Live − table |
+|---|---|---|---|
+| random | +189 | +258 | +70 ± 24 |
+| maniac | +278 | +339 | +61 ± 25 |
+| nit | +37 | +38 | +1 ± 4 |
+| station | +206 | +190 | −16 ± 20 |
+| minbet | +465 | +372 | −92 ± 31 |
+| shover, overbet | +136, +63 | the same | 0 (hands end before the river) |
+
+As in round 1, it gives up some of the table's profit against the bot that
+never folds (minbet), and wins more from the ones that bet with anything.
+
 ## Saved runs
 
 Trained runs are too big for git (v1c is 7.2 GB of card abstraction, 1 GB
