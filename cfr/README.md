@@ -361,6 +361,15 @@ Deal by deal, paired minus scored is consistent with zero in all eight
 comparisons. The scored error bars are 2.7–3.1× narrower: 7–10× fewer deals
 for the same precision.
 
+At a larger scale (a 10-iteration live river, five fresh seeds of 400,000
+deals against v1c, two million deals): paired −9.11 ± 0.62, scored −8.66 ±
+0.22, a difference of −0.45 ± 0.62. One seed alone showed a −2.0 ± 1.4 gap,
+which washed out over the others. And `hu scorecheck --live river` checks
+the identity itself on real spots, with the exact expected result of
+playing live (every later live solve and every opponent reply walked) minus
+playing the table: it equals the exact expected scored sum to 1e-14 on
+2,400 spots, both seats, at 100bb and 200bb.
+
 ### Test round 2
 
 Set before running (`panel.sh`, `panel_report.sh`; results under
