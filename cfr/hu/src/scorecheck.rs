@@ -2,7 +2,7 @@
 //! spots of table-vs-table play, before trusting it with test results.
 //!
 //!   hu scorecheck --run NAME [--opp-run OTHER] [--spots 200] [--playouts 0]
-//!       [--stack 400] [--seed 3] [--verbose]
+//!       [--stack 400] [--seed 3] [--play off|river|turn] [--verbose]
 //!
 //! On turn and river decisions of `--run` (seat 0) against `--opp-run`:
 //!
@@ -20,8 +20,13 @@
 //!    in each tenth.
 //! 4. How long scoring one decision takes, river and turn.
 //!
-//! With `--live river` (and live flags such as `--river-iters`) it checks
-//! the scored identity itself on real spots instead (`live_check`).
+//! With `--play turn` (or `river`) the spots come from hands where seat 0
+//! solves live on those streets, so the checks also cover the states that
+//! only live play reaches (after its own off-table bets).
+//!
+//! With `--live river` or `--live turn` (and live flags such as
+//! `--river-iters`) it checks the scored identity itself on real spots
+//! instead (`live_check`).
 
 use std::time::Instant;
 
@@ -85,6 +90,46 @@ fn spots(me: &Engine, opp: &Engine, n: usize, stack: i32, seed: u64) -> Vec<Spot
     out
 }
 
+/// Like `spots`, but seat 0 plays the streets `mode` covers solving live,
+/// the hands played in parallel (one spot each, dealt from its own seed).
+fn spots_live(me: &Engine, opp: &Engine, n: usize, stack: i32, seed: u64, mode: LiveMode) -> Vec<Spot> {
+    (0..n)
+        .into_par_iter()
+        .map(|i| {
+            let mut rng = SmallRng::seed_from_u64(seed ^ (i as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            loop {
+                let mut deck: Vec<u8> = (0..52).collect();
+                deck.shuffle(&mut rng);
+                let mut s = State::new_table([stack; 2]);
+                s.button = rng.gen_range(0..2);
+                s.start_hand(deck);
+                let init = s.clone();
+                let hseed = rng.gen::<u64>();
+                loop {
+                    match s.phase {
+                        Phase::Betting => {
+                            let seat = s.to_act as usize;
+                            if seat == 0 && s.street >= Street::Turn && rng.gen_bool(0.5) {
+                                return Spot { s, init, seed: hseed };
+                            }
+                            let (e, m) = if seat == 0 { (me, mode) } else { (opp, LiveMode::Off) };
+                            let d = e.decide_mode(&view_of(&s, seat, [stack; 2], hseed), &mut rng, m).expect("decide");
+                            s.apply(d.action);
+                        }
+                        Phase::StreetComplete => {
+                            if is_runout(&s) {
+                                break;
+                            }
+                            s.advance_street();
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        })
+        .collect()
+}
+
 /// Seat 0's chips won playing `s` out with both tables, future cards shuffled.
 fn playout(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, rng: &mut SmallRng) -> f64 {
     let mut t = s.clone();
@@ -140,31 +185,36 @@ fn exact_seat(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, bot: 
                 let mut rng = SmallRng::seed_from_u64(0);
                 return expected_stacks(s, &mut rng)[bot] - stack as f64;
             }
-            let folded = s.players.iter().any(|p| p.status == hu_core::rules::Status::Folded);
-            if folded || s.street == Street::River {
-                let mut t = s.clone();
-                t.advance_street();
-                return exact_seat(me, opp, &t, stack, seed, bot);
-            }
-            let cards = s.deck.clone();
-            cards
-                .iter()
-                .map(|&c| {
-                    let mut t = s.clone();
-                    t.deck.retain(|&x| x != c);
-                    t.deck.push(c);
-                    t.advance_street();
-                    exact_seat(me, opp, &t, stack, seed, bot)
-                })
-                .sum::<f64>()
-                / cards.len() as f64
+            let next = next_states(s);
+            next.iter().map(|t| exact_seat(me, opp, t, stack, seed, bot)).sum::<f64>() / next.len() as f64
         }
         _ => (s.players[bot].stack - stack) as f64,
     }
 }
 
-/// Like `exact`, with seat 0 playing `mode` (live where it covers the
-/// street) instead of its table. River spots only (no cards left to deal).
+/// The states after a completed street (no run-out): the hand's end, or
+/// each card the real deck can deal next.
+fn next_states(s: &State) -> Vec<State> {
+    let folded = s.players.iter().any(|p| p.status == hu_core::rules::Status::Folded);
+    if folded || s.street == Street::River {
+        let mut t = s.clone();
+        t.advance_street();
+        return vec![t];
+    }
+    s.deck
+        .iter()
+        .map(|&c| {
+            let mut t = s.clone();
+            t.deck.retain(|&x| x != c);
+            t.deck.push(c);
+            t.advance_street();
+            t
+        })
+        .collect()
+}
+
+/// Like `exact`, with seat `bot` playing `mode` (live where it covers the
+/// street) instead of its table.
 fn exact_mode(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, mode: LiveMode, bot: usize) -> f64 {
     match s.phase {
         Phase::Betting => {
@@ -184,17 +234,20 @@ fn exact_mode(me: &Engine, opp: &Engine, s: &State, stack: i32, seed: u64, mode:
                 .sum()
         }
         Phase::StreetComplete => {
-            assert_eq!(s.street, Street::River, "river spots only");
-            let mut t = s.clone();
-            t.advance_street();
-            exact_mode(me, opp, &t, stack, seed, mode, bot)
+            if is_runout(s) {
+                let mut rng = SmallRng::seed_from_u64(0);
+                return expected_stacks(s, &mut rng)[bot] - stack as f64;
+            }
+            let next = next_states(s);
+            next.iter().map(|t| exact_mode(me, opp, t, stack, seed, mode, bot)).sum::<f64>() / next.len() as f64
         }
         _ => (s.players[bot].stack - stack) as f64,
     }
 }
 
-/// The expected sum of seat 0's scored advantages (real hand, range) over
-/// its play in `mode` from `s` (river spots only).
+/// The expected sum of seat `bot`'s scored advantages (real hand, range)
+/// over its play in `mode` from `s`.
+#[allow(clippy::too_many_arguments)]
 fn adv_tree(me: &Engine, opp: &Engine, s: &State, init: &State, stack: i32, seed: u64, mode: LiveMode, bot: usize) -> (f64, f64) {
     match s.phase {
         Phase::Betting => {
@@ -217,15 +270,20 @@ fn adv_tree(me: &Engine, opp: &Engine, s: &State, init: &State, stack: i32, seed
             }
             here
         }
+        Phase::StreetComplete if !is_runout(s) => {
+            let next = next_states(s);
+            let k = next.len() as f64;
+            next.iter().map(|t| adv_tree(me, opp, t, init, stack, seed, mode, bot)).fold((0.0, 0.0), |acc, x| (acc.0 + x.0 / k, acc.1 + x.1 / k))
+        }
         _ => (0.0, 0.0),
     }
 }
 
-/// `--live river`: the performance-difference identity on real spots, exactly:
-/// at seat 0's first river decision, (its expected result playing live −
-/// playing its table) must equal the expected sum of its scored advantages
-/// against the opponent's real hand, and on average over spots the range
-/// version too.
+/// `--live river|turn`: the performance-difference identity on real spots,
+/// exactly: at the bot's first decision on a street `mode` covers, (its
+/// expected result playing live − playing its table, every later card
+/// dealt) must equal the expected sum of its scored advantages against the
+/// opponent's real hand, and on average over spots the range version too.
 fn live_check(me: &Engine, opp: &Engine, n: usize, stack: i32, seed: u64, mode: LiveMode) {
     let mut rng = SmallRng::seed_from_u64(seed);
     let mut spots = Vec::new();
@@ -244,7 +302,7 @@ fn live_check(me: &Engine, opp: &Engine, n: usize, stack: i32, seed: u64, mode: 
             match s.phase {
                 Phase::Betting => {
                     let seat = s.to_act as usize;
-                    if seat == bot && s.street == Street::River {
+                    if seat == bot && mode.covers(s.street) {
                         spots.push(Spot { s: s.clone(), init: init.clone(), seed: hseed });
                         bots.push(bot);
                         break;
@@ -275,7 +333,7 @@ fn live_check(me: &Engine, opp: &Engine, n: usize, stack: i32, seed: u64, mode: 
         .collect();
     let worst = rows.iter().map(|r| (r.0 - r.1).abs() / r.0.abs().max(1.0)).fold(0f64, f64::max);
     let bad = rows.iter().filter(|r| (r.0 - r.1).abs() > 1e-6 * r.0.abs().max(1.0)).count();
-    log(format!("live (V_live - V_table) vs expected scored sum (real hand) on {} river spots (bot in either seat): largest relative difference {worst:.2e}, {bad} above 1e-6 (should be 0)", rows.len()));
+    log(format!("live (V_live - V_table) vs expected scored sum (real hand) on {} {} spots (bot in either seat): largest relative difference {worst:.2e}, {bad} above 1e-6 (should be 0)", rows.len(), mode.name()));
     let k = rows.len() as f64;
     let d: Vec<f64> = rows.iter().map(|r| r.0 - r.2).collect();
     let m = d.iter().sum::<f64>() / k;
@@ -318,7 +376,8 @@ pub fn scorecheck_cmd(args: &[String]) {
         return;
     }
     let t0 = Instant::now();
-    let spots = spots(&me, opp, n, stack, seed);
+    let play = flag(args, "--play").map(|m| LiveMode::parse(&m).unwrap_or_else(|| panic!("--play off|river|turn, not {m}"))).unwrap_or(LiveMode::Off);
+    let spots = if play == LiveMode::Off { spots(&me, opp, n, stack, seed) } else { spots_live(&me, opp, n, stack, seed, play) };
     log(format!("{} spots ({} river) in {:.1}s", spots.len(), spots.iter().filter(|x| x.s.street == Street::River).count(), t0.elapsed().as_secs_f64()));
 
     struct Out {
@@ -422,7 +481,7 @@ pub fn scorecheck_cmd(args: &[String]) {
             // that hand in its seat, multiplied.
             let mut like_diff = 0f64;
             if let Some(r) = opp.table_likelihood(&sp.init, &s.actions, 1, stacks, button, sp.seed, &dead) {
-                for h in (0..H).step_by(37) {
+                for h in (0..H).step_by(37).chain(std::iter::once(hand(opp_hole))) {
                     let [a, b] = hs[h];
                     if dead.contains(&a) || dead.contains(&b) {
                         continue;

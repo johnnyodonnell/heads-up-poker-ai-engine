@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Summarize cfr/panel.sh (round 2): scored live - table per opponent and
-# pooled, the paired cross-check, live turn - live river on the same deals,
-# and the probe bots. bb/100 with 95% intervals.
+# pooled, the paired cross-check, live turn - live river on the same deals
+# (scored, and the real-hand score and chips as cross-checks), and the
+# probe bots. bb/100 with 95% intervals.
 #
 #   cfr/box.sh ./panel_report.sh
 set -uo pipefail
@@ -58,13 +59,14 @@ for tag, name in [("river", "live river"), ("turn", "live turn")]:
     print(f"== {name} - table (paired matches, cross-check)")
     for o in opps:
         show(o, paired(series(tag, o, "txt"), series("table", o, "txt")))
-print("== live turn - live river (scored, same deals)")
-pooled = []
-for o in opps:
-    d = paired(series("turn", o, "adv"), series("river", o, "adv"))
-    pooled += d
-    show(o, d)
-show("pooled", pooled)
+for ext, name in [("adv", "scored"), ("advfull", "scored on the real hand, cross-check"), ("txt", "chips, cross-check")]:
+    print(f"== live turn - live river ({name}, same deals)")
+    pooled = []
+    for o in opps:
+        d = paired(series("turn", o, ext), series("river", o, ext))
+        pooled += d
+        show(o, d)
+    show("pooled", pooled)
 print("== probe bots: table, and live minus table on the same deals")
 for b in ["station", "maniac", "nit", "shover", "minbet", "overbet", "random"]:
     t = series("table", b, "txt")

@@ -183,6 +183,8 @@ hu livebench --run v1c --street river --spots 40 --iters 400 --check-safe   # sa
 hu livebench --run v1c --street turn --spots 10 --iters 150 --compare-gpu   # GPU vs CPU solves (identical)
 hu rangecheck --run v1c --opp-run v1a       # how well the table's range estimates fit another run's play
 hu scorecheck --run v1c --opp-run v1a --spots 3000   # checks of advantage scoring on real spots
+hu scorecheck --run v1c --opp-run v1a --stack 200 --spots 300 --play turn   # ... on spots of live turn play
+hu scorecheck --run v1c --opp-run v1a --stack 200 --spots 40 --live turn    # the scored identity, exactly
 hu compare A.txt B.txt                      # paired difference of two saved matches
 ./panel.sh; ./panel_report.sh               # the test panel (round 2, below) and its results
 ```
@@ -370,6 +372,16 @@ playing live (every later live solve and every opponent reply walked) minus
 playing the table: it equals the exact expected scored sum to 1e-14 on
 2,400 spots, both seats, at 100bb and 200bb.
 
+The same on live turn play. `hu scorecheck --play turn` takes its spots
+from hands where the bot solves the turn live, so they include the states
+only live play reaches, after its own off-table bets (300 spots against
+v1a, 85 of them river decisions after a live turn): Q equals the exact walk
+to 7e-15, the range equals the opponent's likelihood hand by hand to 3e-16,
+and the real hand falls evenly through it (7–13% of spots per tenth).
+And `hu scorecheck --live turn` checks the identity at the bot's first turn
+decision, every river card dealt and every later live solve walked: exact
+to 1e-14 on 40 spots against v1a, both seats.
+
 ### Test round 2
 
 Set before running (`panel.sh`, `panel_report.sh`; results under
@@ -418,6 +430,39 @@ against all of them, and on the same deals compared with the table:
 
 As in round 1, it gives up some of the table's profit against the bot that
 never folds (minbet), and wins more from the ones that bet with anything.
+
+**Live turn does not pass.** Live turn solves the turn as well as the
+river. On the same deals as live river, 16,000 per opponent (32,000 hands
+each), scored, bb/100:
+
+| Opponent | Live turn − table | Live turn − live river |
+|---|---|---|
+| v1c | +2.3 ± 2.5 | −1.1 ± 2.6 |
+| v1a | +1.4 ± 2.8 | −1.8 ± 2.9 |
+| Pooled | +1.9 ± 1.9 | **−1.5 ± 1.9** |
+
+Solving the turn too gains nothing measurable over solving the river alone:
+the pooled interval against live river doesn't lie above zero, so the first
+gate fails. The other two pass: against neither opponent is it clearly
+worse than live river, and it beats the three scripted bots it played
+(1,000 deals each, the ones where the river panel showed a gap): station
++160 ± 54, maniac +387 ± 135, minbet +381 ± 116. The first 12,000 deals per
+opponent missed ±3 bb/100, so the turn was extended by 4,000
+(`TURN_FROM=12000`), as set.
+
+The cross-checks lean the other way, but don't clear zero either: live turn
+− live river is +2.9 ± 4.4 scored on the opponent's real hand and +4.7 ±
+6.5 in chips (pooled, same deals). After the first 12,000 deals the two
+scored versions differed by +8 ± 5 bb/100 (about three standard errors;
+on the river they agree), so the scoring was checked again on the spots only
+live turn play reaches (see "Scoring live solving against the table"): it is
+exact there. On the next 4,000 deals per opponent the difference went the
+other way, and over all 16,000 it is +4.7 ± 4.4. It is the real-hand
+version's luck with the opponent's hands, which the range version doesn't
+have.
+
+So live river is the candidate to serve. Live turn costs a turn solve per
+turn decision (about a second on the GPU) for no measurable gain.
 
 ## Saved runs
 
