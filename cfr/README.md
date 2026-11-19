@@ -517,11 +517,18 @@ which live play answers at their real size and the table translates, live
 turn decisions gain −3.1 ± 3.5 bb/100 over the table's (v1c: +0.8 ± 3.4).
 Live river, by contrast, does gain from them: against v1c@1.35 it beats the
 table by +6.2 ± 2.0 bb/100 (30,000 deals, scored), twice its +3.3 ± 1.3
-against v1c.
+against v1c. In a full match against v1c@1.35, where the river decisions
+after an exact turn count too, live turn − live river on the same 16,000
+deals is +1.5 ± 3.2 bb/100 (scored; on the real hand +4.8 ± 7.1, in chips
++1.3 ± 10.4). It leans towards live turn, where against v1c and v1a it
+leaned the other way, but isn't significant.
 
-A longer match wouldn't change this. Live turn − live river is −1.5 ± 1.9
-bb/100, which rules out a gain above +0.5 against these opponents; finding a
-gain of +1 would take about 250,000 deals. What matches against fixed bots
+Against v1c and v1a a longer match wouldn't change this: live turn − live
+river is −1.5 ± 1.9 bb/100, which rules out a gain above +0.5; finding a gain
+of +1 would take about 250,000 deals. Against off-menu sizes, which people
+playing the app use all the time, it might: finding a gain of +1.5 reliably
+(80% of the time) would take about 150,000 deals, a day of the box. What
+matches against fixed bots
 can't see is exploitability. Published subgame solving made bots far harder
 to exploit (Libratus solved live from the turn on and after every opponent
 bet; in Brown & Sandholm 2017, re-solving left a test game 150 mbb/hand
