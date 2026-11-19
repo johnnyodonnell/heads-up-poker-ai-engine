@@ -28,7 +28,7 @@ hu_cfr/           the engine:
                     safe re-solving against the table's values
   pushfold.rs, toy.rs, br.rs   solver validation games and exact best response
 hu/               the `hu` command line (abstraction, train, export, eval, compare,
-                  probe, livebench, serve, slumbot, slumbot-diag, tree, pushfold)
+                  probe, livebench, rangecheck, serve, tree, pushfold)
 scripts/          TS run with tsx: rule scenario checks, parity fixture dumper
 fixtures/         parity fixtures dumped from the TS engine (gitignored)
 box_env.sh        environment for the box (sourced by everything below)
@@ -65,7 +65,6 @@ cfr/box.sh tail -n 3 '$HU_HOME/logs/train-v1b.log'
 # 3. check it
 cfr/box.sh ./target/release/hu eval --run v1b                 # vs the scripted bots
 cfr/box.sh ./target/release/hu probe --run v1b                # preflop charts
-cfr/box_bg.sh slumbot-v1b ./target/release/hu slumbot --run v1b --hands 10000 --sessions 2   # vs Slumbot (200bb)
 # 4. serve it
 cfr/box.sh 'echo v1b > $HU_HOME/current_run && pm2 restart hu-engine'
 ```
@@ -113,8 +112,10 @@ reaches them. Intervals are ±5 to ±24.
 
 ### Against Slumbot
 
-`hu slumbot --run v1c --hands 10000 --sessions 2` (2026-11-17, 91 min).
-[Slumbot](https://slumbot.com) is a strong public research bot. It plays
+2026-11-17, through Slumbot's public API (the `hu slumbot` client has since
+been removed: its rate limits made long runs unreliable, and testing now uses
+only bots built here). [Slumbot](https://slumbot.com) is a strong public
+research bot. It plays
 200bb stacks, deeper than v1c's deepest strategy (100bb), so v1c plays it
 with its 100bb strategy.
 
@@ -130,12 +131,12 @@ That is break-even with Slumbot within the noise. The clearest leak is in
 hands played for the full 200bb: the 100bb strategy's all-in is half the
 size of the real one, so the bot gets its whole stack in too easily. A
 strategy trained at 200bb (a new deepest depth) would target that; it does
-not affect the app, whose matches start at 100bb. Every hand is logged to
-`$HU_HOME/logs/slumbot-v1c.jsonl`.
+not affect the app, whose matches start at 100bb. The hand logs are kept in
+`$HU_HOME/logs/slumbot-*.jsonl`.
 
 ## Live solving (v2)
 
-With `--live river` or `--live turn` (on `hu eval`, `serve`, `slumbot`), the
+With `--live river` or `--live turn` (on `hu eval`, `serve`, `livebench`), the
 engine solves turn and river decisions live instead of looking them up;
 preflop and the flop stay on the table. Off by default, and not served yet.
 
@@ -176,8 +177,7 @@ Checking it:
 cargo test --release -p hu_cfr live         # solver unit tests (below)
 hu livebench --run v1c --street turn --spots 20 --iters 150,300   # time and convergence on real spots
 hu livebench --run v1c --street river --spots 40 --iters 400 --check-safe   # safe vs unsafe solves
-hu slumbot-diag --run v1c --live river --log $HU_HOME/logs/slumbot-v1c-live-river.jsonl
-                                            # opponent ranges vs the hands Slumbot really held
+hu rangecheck --run v1c --opp-run v1a       # how well the table's range estimates fit another run's play
 hu compare A.txt B.txt                      # paired difference of two saved matches
 ./panel.sh; ./panel_report.sh               # the test panel (below) and its paired results
 ```
@@ -193,9 +193,9 @@ solving doesn't (0.34% vs 12.9% of the pot).
 The first version was unsafe: it trusted the estimated opponent range.
 Against Slumbot (10,000 hands each, minus what Slumbot wins with the same
 cards, ± about 31) it did no better than the table: table +18.2, live river
-+17.5, live turn −13.4. Slumbot shows its cards after every hand, so
-`hu slumbot-diag` could check the estimates against the hands it really
-held: they were badly overconfident, predicting those hands worse than
++17.5, live turn −13.4. Slumbot shows its cards after every hand, so a
+diagnostic (since removed with the Slumbot client) could check the
+estimates against the hands it really held: they were badly overconfident, predicting those hands worse than
 "any hand" would (−2.8 nats per hand at the start of the river). The
 estimates are now hedged and fit to those logs (`LiveCfg`: +0.33 nats per
 hand, calibrated), and safe re-solving makes the solve hold up when the

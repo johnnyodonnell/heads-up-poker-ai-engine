@@ -12,7 +12,7 @@
 //!       measure how close to equilibrium they get (or compare safe and
 //!       unsafe solves of them)
 //!
-//! Live flags (eval, serve, slumbot, slumbot-diag, livebench): --live
+//! Live flags (eval, serve, livebench): --live
 //! off|river|turn, --river-iters N, --turn-iters N, --turn-menu
 //! full|medium|lean, and the opponent-range hedges (defaults in
 //! `hu_cfr::live::LiveCfg`): --opp-floor F (least likelihood of an opponent
