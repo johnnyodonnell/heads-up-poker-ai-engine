@@ -9,7 +9,7 @@ import {
 import type { EngineState } from "../engine/game";
 import { loadTable, saveTable } from "../engine/saved";
 // The bot's engine. Swap this one import to plug in a different engine.
-import { bestMove, onDecision } from "../engine/remote";
+import { bestMove, onDecision, thinkingMs } from "../engine/remote";
 import type { BotDecision } from "../engine/remote";
 import { toGameState, fromBetAction } from "../engine/adapt";
 
@@ -24,11 +24,24 @@ class AdvanceError extends Error {
   }
 }
 
+// The bot's decision being worked out: its seat, how long the thinking bar
+// runs (ms, 0 = no bar) and an id per decision (restarts the bar).
+export interface Thinking {
+  seat: number;
+  ms: number;
+  id: number;
+}
+
 // Run the engine forward until a human decision is required or the hand/match
-// ends. The bot's move is awaited (it comes from the engine service); there is
-// no artificial pacing: the table updates once, when the run-out is done.
-// Bounded by a generous step cap purely as a runaway-loop backstop.
-async function advance(state: EngineState): Promise<EngineState> {
+// ends. The bot's move is awaited (it comes from the engine service). Before
+// each bot decision `onThink` gets the state it's deciding in (so the table
+// shows a newly dealt card while the bot thinks), and null once it has moved;
+// otherwise there is no pacing. Bounded by a generous step cap purely as a
+// runaway-loop backstop.
+async function advance(
+  state: EngineState,
+  onThink: (s: EngineState | null) => void,
+): Promise<EngineState> {
   let s = state;
   for (let step = 0; step < 10000; step++) {
     if (s.phase === "street-complete") {
@@ -39,10 +52,13 @@ async function advance(state: EngineState): Promise<EngineState> {
       const actor = s.players[s.toAct];
       if (actor && !actor.isHuman) {
         let action;
+        onThink(s);
         try {
           action = await bestMove(s);
         } catch (err) {
           throw new AdvanceError(err instanceof Error ? err.message : String(err), s);
+        } finally {
+          onThink(null);
         }
         s = applyAction(s, action);
         continue;
@@ -62,6 +78,7 @@ export function useGameState(): {
   retry: () => void;
   gameOver: boolean;
   isProcessingBots: boolean;
+  thinking: Thinking | null;
   engineError: string | null;
   decisions: BotDecision[];
 } {
@@ -69,6 +86,8 @@ export function useGameState(): {
   const [busy, setBusy] = useState(false);
   const [engineError, setEngineError] = useState<string | null>(null);
   const [decisions, setDecisions] = useState<BotDecision[]>([]);
+  const [thinking, setThinking] = useState<Thinking | null>(null);
+  const thinkId = useRef(0);
   const engineRef = useRef(engine);
   // Bumped by every new run (and New Game): a bot run that finishes after
   // it has been superseded is discarded.
@@ -96,8 +115,17 @@ export function useGameState(): {
       set(start);
       setBusy(true);
       setEngineError(null);
+      const onThink = (s: EngineState | null) => {
+        if (generation.current !== my) return;
+        if (!s) {
+          setThinking(null);
+          return;
+        }
+        if (s !== engineRef.current) set(s);
+        setThinking({ seat: s.toAct, ms: thinkingMs(s), id: ++thinkId.current });
+      };
       try {
-        const end = await advance(start);
+        const end = await advance(start, onThink);
         if (generation.current !== my) return;
         set(end);
       } catch (err) {
@@ -140,6 +168,7 @@ export function useGameState(): {
     generation.current++;
     set(createTable());
     setBusy(false);
+    setThinking(null);
     setEngineError(null);
     setDecisions([]);
   }, [set]);
@@ -153,6 +182,7 @@ export function useGameState(): {
     retry,
     gameOver: engine.phase === "match-over",
     isProcessingBots: busy,
+    thinking,
     engineError,
     decisions,
   };

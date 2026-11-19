@@ -2,6 +2,7 @@ import { dollars } from "../money";
 import type { Player as PlayerType, Phase } from "../types";
 import Card from "./Card";
 import { SEAT_POS, at } from "./layout";
+import type { Thinking } from "../hooks/useGameState";
 import "./PlayerSeat.css";
 
 const ACTION_LABELS: Record<NonNullable<PlayerType["lastAction"]>, string> = {
@@ -37,6 +38,9 @@ interface PlayerSeatProps {
   isActing: boolean;
   showdown: boolean;
   faceUp?: boolean;
+  // Set while this seat's decision is being worked out: a bar under the
+  // plate that empties over `thinking.ms`.
+  thinking?: Thinking | null;
 }
 
 export default function PlayerSeat({
@@ -47,6 +51,7 @@ export default function PlayerSeat({
   isActing,
   showdown,
   faceUp,
+  thinking = null,
 }: PlayerSeatProps) {
   const folded = player.status === "folded";
   const out = player.status === "eliminated";
@@ -91,6 +96,15 @@ export default function PlayerSeat({
         <div className="seat-name">{player.name}</div>
         <div className="seat-stack">{dollars(player.chips)}</div>
       </div>
+      {thinking && (
+        <div className="seat-think" role="progressbar" aria-label={`${player.name} is thinking`}>
+          <div
+            key={thinking.id}
+            className="seat-think-fill"
+            style={{ animationDuration: `${thinking.ms}ms` }}
+          />
+        </div>
+      )}
       {label && <div className={`seat-label label-${label.kind}`}>{label.text}</div>}
     </div>
   );

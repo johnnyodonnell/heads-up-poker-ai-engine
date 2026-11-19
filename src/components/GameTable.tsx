@@ -10,6 +10,7 @@ import ActionPanel from "./ActionPanel";
 import HandResult from "./HandResult";
 import DebugPanel from "./DebugPanel";
 import type { BotDecision } from "../engine/remote";
+import type { Thinking } from "../hooks/useGameState";
 import { STAGE_WIDTH, STAGE_HEIGHT, BET_POS } from "./layout";
 import "./GameTable.css";
 
@@ -20,6 +21,8 @@ interface GameTableProps {
   gameOver: boolean;
   onNewGame: () => void;
   isProcessingBots?: boolean;
+  // The bot's decision in progress (drives the thinking bar on its seat).
+  thinking?: Thinking | null;
   faceUp?: boolean;
   // Debug view: the toggle, and the bot's decisions this hand.
   debug?: boolean;
@@ -50,6 +53,7 @@ export default function GameTable({
   gameOver,
   onNewGame,
   isProcessingBots = false,
+  thinking = null,
   faceUp = false,
   debug = false,
   onToggleDebug,
@@ -102,6 +106,7 @@ export default function GameTable({
               isActing={gameState.actionOnSeat === p.seat}
               showdown={gameState.showdown}
               faceUp={faceUp}
+              thinking={thinking && thinking.seat === p.seat && thinking.ms > 0 ? thinking : null}
             />
           ))}
           {handOver && (

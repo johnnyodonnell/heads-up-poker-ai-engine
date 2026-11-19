@@ -5,6 +5,7 @@
 //
 //   await bestMove(state)       // -> an Action for state.toAct
 //   onDecision(listener)        // the debug info of every decision
+//   thinkingMs(state)           // how long the thinking bar runs for this decision
 
 import type { Action, EngineState } from "./game";
 
@@ -61,6 +62,26 @@ export function onDecision(listener: Listener): () => void {
   return () => {
     listeners = listeners.filter((l) => l !== listener);
   };
+}
+
+// Which streets the box solves live ("off", "river" or "turn"), from
+// /api/health at page load. Until it answers (or if it can't), no bar.
+let liveMode = "off";
+void fetch("/api/health")
+  .then((r) => (r.ok ? r.json() : null))
+  .then((h: { live?: string } | null) => {
+    if (h?.live) liveMode = h.live;
+  })
+  .catch(() => {});
+
+// How long the bot's thinking bar runs for the decision in `state`: twice
+// the typical end-to-end time on the box (measured 2026-11-19, bot vs bot,
+// 60 hands per mode: a live river decision ~0.55 s, ~0.6 s under live turn;
+// a live turn decision ~2.3 s). Table lookups take ~10 ms, so 0 (no bar).
+export function thinkingMs(state: EngineState): number {
+  if (state.street === "river" && liveMode !== "off") return 1200;
+  if (state.street === "turn" && liveMode === "turn") return 4500;
+  return 0;
 }
 
 export async function bestMove(state: EngineState): Promise<Action> {

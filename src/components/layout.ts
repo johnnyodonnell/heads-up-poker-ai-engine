@@ -19,10 +19,11 @@ export const SEAT_POS: Point[] = [
   { x: 670, y: 172 },
 ];
 
-// Where each seat's current-street bet sits on the felt.
+// Where each seat's current-street bet sits on the felt. The bot's sits low
+// enough to leave room for its thinking bar under the plate.
 export const BET_POS: Point[] = [
   { x: 670, y: 628 },
-  { x: 670, y: 245 },
+  { x: 670, y: 256 },
 ];
 
 // Where the dealer button sits when that seat has the button.

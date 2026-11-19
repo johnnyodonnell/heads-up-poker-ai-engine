@@ -88,10 +88,29 @@ export default function ActionPanel({
 
   if (isProcessingBots) {
     // The bot's move comes from the engine service; live solves take a
-    // second or two.
+    // second or two. The controls stay put, greyed out and without amounts
+    // (what you'll face depends on the bot's move).
     return (
-      <div className="action-panel">
-        <span className="action-thinking">Bot is thinking…</span>
+      <div className="action-panel is-waiting" aria-busy="true">
+        {(["Take chips off the bet", "Add chips to the bet"] as const).map((rowLabel, r) => (
+          <div key={rowLabel} className="chip-row" aria-label={rowLabel}>
+            <span className="chip-row-sign">{r === 0 ? "−" : "+"}</span>
+            {DENOMINATIONS.map((value) => (
+              <Chip key={value} value={value} onClick={() => {}} disabled label={rowLabel} />
+            ))}
+          </div>
+        ))}
+        <div className="action-buttons">
+          <button className="btn btn-fold" disabled>
+            Fold
+          </button>
+          <button className="btn btn-call" disabled>
+            Call
+          </button>
+          <button className="btn btn-raise" disabled>
+            Raise
+          </button>
+        </div>
       </div>
     );
   }

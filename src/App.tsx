@@ -21,6 +21,7 @@ export default function App() {
     retry,
     gameOver,
     isProcessingBots,
+    thinking,
     engineError,
     decisions,
   } = useGameState();
@@ -44,6 +45,7 @@ export default function App() {
       gameOver={gameOver}
       onNewGame={newGame}
       isProcessingBots={isProcessingBots}
+      thinking={thinking}
       faceUp={debug}
       debug={debug}
       onToggleDebug={toggleDebug}

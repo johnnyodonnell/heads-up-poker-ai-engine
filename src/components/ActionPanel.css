@@ -29,11 +29,11 @@
   transition: background 0.15s, border-color 0.15s, transform 0.08s;
 }
 
-.btn:hover {
+.btn:hover:not(:disabled) {
   background: linear-gradient(180deg, #353b46 0%, #23272f 100%);
 }
 
-.btn:active {
+.btn:active:not(:disabled) {
   transform: translateY(1px);
 }
 
@@ -55,6 +55,11 @@
   min-width: 240px;
   border-color: #17a673;
   background: linear-gradient(180deg, #1aa676 0%, #0f7a55 100%);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .btn-deal:hover {
@@ -148,17 +153,8 @@
   --chip-text: #fff;
 }
 
-/* While the bot's move is being worked out on the box. */
-.action-thinking {
-  color: #c9ccd3;
-  font-size: 24px;
-  font-style: italic;
-  padding: 18px 8px;
-  animation: action-thinking-pulse 1.4s ease-in-out infinite;
-}
-
-@keyframes action-thinking-pulse {
-  50% {
-    opacity: 0.45;
-  }
+/* While the bot's move is being worked out on the box, everything is greyed
+   out (the buttons by .btn:disabled); the chips dim as one, not chip by chip. */
+.action-panel.is-waiting .bet-chip:disabled {
+  opacity: 0.4;
 }
