@@ -114,6 +114,10 @@ pub struct Engine {
     pub live_cfg: LiveCfg,
     /// Live solves of recent hands.
     pub cache: Cache,
+    /// Scale on the table's bet and raise sizes after the flop (1 = as
+    /// trained): a test opponent that plays the table's strategy at sizes
+    /// off its menu (`run:NAME@SCALE` in `hu eval`).
+    pub bet_scale: f32,
 }
 
 /// Abstract player of a real seat: 0 = small blind / button, 1 = big blind.
@@ -484,6 +488,17 @@ impl Engine {
         Ok(Decision { action, debug, dist })
     }
 
+    /// The real action abstract action `a` becomes at `s`, bets and raises
+    /// after the flop scaled by `bet_scale`.
+    fn real_of(&self, a: &Act, legal: &Legal, s: &State, pac: i32) -> Action {
+        let scaled = match *a {
+            Act::Bet { to, frac } if self.bet_scale != 1.0 && s.street != Street::Preflop => Act::Bet { to, frac: frac * self.bet_scale },
+            Act::Raise { to, frac } if self.bet_scale != 1.0 && s.street != Street::Preflop => Act::Raise { to, frac: frac * self.bet_scale },
+            x => x,
+        };
+        to_real(&scaled, legal, s.current_bet, pac)
+    }
+
     /// The table's play at real state `s` for the seat to act holding
     /// `hole`, before sampling (what `decide` samples from): `stacks` are
     /// the hand's starting stacks, `seed` its seed (translation, fallback).
@@ -526,7 +541,7 @@ impl Engine {
         let acts = tree.actions(nd);
         let mut dist: Vec<(Action, f64)> = Vec::new();
         for a in 0..n {
-            let real = to_real(&acts[a], &legal, s.current_bet, pac);
+            let real = self.real_of(&acts[a], &legal, s, pac);
             dbg.options.push(Opt { label: acts[a].label(), action: action_label(&real), prob: p[a] });
             match dist.iter_mut().find(|m| m.0 == real) {
                 Some(m) => m.1 += p[a],
@@ -592,7 +607,7 @@ impl Engine {
                 let pac = pot_total + (s.current_bet - me.bet);
                 let n = nd.n as usize;
                 let acts = tree.actions(nd);
-                let to: Vec<usize> = (0..n).map(|a| index_of(to_real(&acts[a], &legal, s.current_bet, pac), &mut opts)).collect();
+                let to: Vec<usize> = (0..n).map(|a| index_of(self.real_of(&acts[a], &legal, s, pac), &mut opts)).collect();
                 let mut p = vec![0f64; opts.len() * H];
                 let mut q = [0f64; MAX_ACTIONS];
                 let st = s.street.index();
@@ -677,7 +692,7 @@ impl Engine {
         if strategies.is_empty() {
             return Err(std::io::Error::other("no strategies"));
         }
-        Ok(Engine { abs, strategies, live: LiveMode::Off, live_cfg: LiveCfg::default(), cache: Cache::new(256) })
+        Ok(Engine { abs, strategies, live: LiveMode::Off, live_cfg: LiveCfg::default(), cache: Cache::new(256), bet_scale: 1.0 })
     }
 
     /// The table's node after the hand's first `upto` actions (the same

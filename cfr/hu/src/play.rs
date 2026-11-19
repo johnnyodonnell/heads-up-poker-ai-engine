@@ -36,7 +36,8 @@
 //! GPU at once; the rest on the CPU; default 4). `hu livebench --street turn --compare-gpu`
 //! solves each spot both ways.
 //! `run:OTHER` rivals always play their table only (`run:NAME` with the same
-//! run: the run without live solving).
+//! run: the run without live solving); `run:OTHER@SCALE` bets SCALE times
+//! its table's sizes after the flop (sizes off the bot's menu).
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -67,6 +68,19 @@ pub fn strategy_dirs(run: &str) -> Vec<PathBuf> {
         .collect();
     dirs.sort();
     dirs
+}
+
+/// A rival's engine: `NAME`, or `NAME@SCALE` for that run's table betting
+/// SCALE times its sizes after the flop (`Engine::bet_scale`).
+pub fn load_rival(spec: &str) -> Engine {
+    match spec.split_once('@') {
+        Some((name, scale)) => {
+            let mut e = load_engine(name);
+            e.bet_scale = scale.parse().unwrap_or_else(|_| panic!("{spec}: NAME@SCALE"));
+            e
+        }
+        None => load_engine(spec),
+    }
 }
 
 /// Load a run's strategies (all trained on one abstraction) into an engine.
@@ -186,7 +200,7 @@ pub fn eval_cmd(args: &[String]) {
     // `run:NAME` plays against another trained run (its table only) instead
     // of a scripted bot.
     let rivals: Vec<(String, Engine)> =
-        names.iter().filter_map(|n| n.strip_prefix("run:")).filter(|r| *r != run).map(|r| (r.to_string(), load_engine(r))).collect();
+        names.iter().filter_map(|n| n.strip_prefix("run:")).filter(|r| *r != run).map(|r| (r.to_string(), load_rival(r))).collect();
     for name in names {
         let t = Instant::now();
         use std::sync::atomic::Ordering::Relaxed;

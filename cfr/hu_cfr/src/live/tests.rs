@@ -3,9 +3,10 @@ use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
 
 use hu_core::cards::{parse, Card};
-use hu_core::rules::{Action, ActionType, Phase, State, Street};
+use hu_core::hand_eval::eval7;
+use hu_core::rules::{Action, ActionType, Phase, State, Status, Street};
 
-use super::showdown::{hand, H};
+use super::showdown::{hand, holes, mask, H};
 use super::solver::Solver;
 use super::subgame::{self, Kind, Node, Subgame};
 use crate::engine::HistAction;
@@ -274,4 +275,156 @@ fn safe_resolving_holds_every_hand_to_its_alternative() {
     // hands the estimate dropped too.
     let enter = safe_sv.gadget_enter().unwrap();
     assert!(order[..order.len() / 2].iter().any(|&h| enter[h] > 0.0));
+}
+
+/// A turn spot with a real pot: a raised preflop pot and a bet and call on
+/// the flop (stacks 400 chips = 200bb), with a shuffled deck.
+fn raised_turn(seed: u64) -> State {
+    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut deck: Vec<Card> = (0..52).collect();
+    deck.shuffle(&mut rng);
+    let mut s = State::new_table([400, 400]);
+    s.start_hand(deck);
+    s.apply(Action::to(ActionType::Raise, 6));
+    s.apply(Action::new(ActionType::Call));
+    s.advance_street();
+    s.apply(Action::to(ActionType::Bet, 8));
+    s.apply(Action::new(ActionType::Call));
+    s.advance_street();
+    assert_eq!((s.street, s.phase), (Street::Turn, Phase::Betting));
+    s
+}
+
+/// What `p` holding `h` wins at `node` (state `s`), best-responding to an
+/// opponent who plays uniformly at random with reach `ro` (per hand,
+/// `holes()` order): every action through the rules port, every river card
+/// dealt from the deck, every hand settled by the state's commitments and
+/// `eval7`. `strength[c][h']` is hand `h'`'s strength with river card `c`.
+fn brute_br(g: &Subgame, s: &State, node: u32, p: usize, h: [Card; 2], ro: &[f64], strength: &[Vec<u32>]) -> f64 {
+    let nd = &g.nodes[node as usize];
+    let kids = g.children(nd);
+    let disjoint = |x: [Card; 2]| x[0] != h[0] && x[0] != h[1] && x[1] != h[0] && x[1] != h[1];
+    match nd.kind {
+        Kind::Decision(q) => {
+            assert_eq!((s.phase, s.to_act), (Phase::Betting, q as i32), "the tree's seat to act");
+            let vals: Vec<f64> = g
+                .actions(nd)
+                .iter()
+                .zip(kids)
+                .map(|(&a, &k)| {
+                    let mut t = s.clone();
+                    t.apply(a);
+                    brute_br(g, &t, k, p, h, ro, strength)
+                })
+                .collect();
+            if q as usize == p {
+                vals.iter().copied().fold(f64::MIN, f64::max)
+            } else {
+                vals.iter().sum::<f64>() / vals.len() as f64
+            }
+        }
+        Kind::Chance => {
+            assert_eq!(s.phase, Phase::StreetComplete);
+            let mut total = 0.0;
+            for c in 0..52u8 {
+                if s.community.contains(&c) || h.contains(&c) {
+                    continue;
+                }
+                let ro2: Vec<f64> = holes().iter().zip(ro).map(|(&[a, b], &x)| if a == c || b == c { 0.0 } else { x }).collect();
+                let mut t = s.clone();
+                t.deck.retain(|&x| x != c);
+                t.deck.push(c);
+                t.advance_street();
+                assert_eq!(t.community.last(), Some(&c));
+                total += brute_br(g, &t, kids[0], p, h, &ro2, strength);
+            }
+            // Each pair of hands meets the 44 cards outside both and the board.
+            total / 44.0
+        }
+        Kind::Fold(w) => {
+            let folded = (0..2).find(|&i| s.players[i].status == Status::Folded).expect("someone folded");
+            assert_eq!(1 - folded, w as usize);
+            let v = if folded == p { -(s.players[p].commit as f64) } else { s.players[1 - p].commit as f64 };
+            let reach: f64 = holes().iter().zip(ro).filter(|(&x, _)| disjoint(x)).map(|(_, &r)| r).sum();
+            v * reach
+        }
+        Kind::Showdown => {
+            assert_eq!(s.community.len(), 5);
+            let c = s.community[4] as usize;
+            let mut cards = h.to_vec();
+            cards.extend_from_slice(&s.community);
+            let mine = eval7(&cards);
+            let m = s.players[0].commit.min(s.players[1].commit) as f64;
+            let mut net = 0.0;
+            for (k, (&x, &r)) in holes().iter().zip(ro).enumerate() {
+                if r != 0.0 && disjoint(x) {
+                    net += r * match mine.cmp(&strength[c][k]) {
+                        std::cmp::Ordering::Greater => 1.0,
+                        std::cmp::Ordering::Less => -1.0,
+                        std::cmp::Ordering::Equal => 0.0,
+                    };
+                }
+            }
+            m * net
+        }
+    }
+}
+
+/// The turn solver's game is the real game: each hand's best response to
+/// an untrained turn solve (whose average strategy is uniformly random
+/// everywhere, river included), from the solver (CPU, and the GPU when the
+/// `gpu` feature finds one) and from an independent walk of the same tree
+/// that plays every action through the rules port, deals every river card
+/// and settles every hand by its commitments and `eval7` (`brute_br`).
+/// Covers the tree, fold and showdown payoffs, all-in run-outs, the river
+/// cards and card removal between the hands, the river and the board.
+#[test]
+fn turn_best_responses_match_the_rules_engine() {
+    let spots = [(at_street(Street::Turn, 3), "medium"), (raised_turn(5), "medium"), (raised_turn(9), "full")];
+    for (i, (s, menu)) in spots.iter().enumerate() {
+        let g = subgame::build(s, &[], &LiveMenu::turn_by_name(menu).unwrap(), &LiveMenu::river_in_turn()).unwrap();
+        let mut rng = SmallRng::seed_from_u64(i as u64 + 40);
+        let mut ranges = random_ranges(&mut rng);
+        for r in ranges.iter_mut() {
+            mask(r, &s.community);
+        }
+        let strength: Vec<Vec<u32>> = (0..52u8)
+            .map(|c| {
+                holes()
+                    .iter()
+                    .map(|&[a, b]| {
+                        if s.community.contains(&c) || [a, b].contains(&c) || s.community.contains(&a) || s.community.contains(&b) {
+                            return 0;
+                        }
+                        let mut x = vec![a, b];
+                        x.extend_from_slice(&s.community);
+                        x.push(c);
+                        eval7(&x)
+                    })
+                    .collect()
+            })
+            .collect();
+        let ours: Vec<usize> = (0..H).filter(|&h| ranges[0][h] > 0.0 && ranges[1][h] > 0.0).step_by(37).collect();
+        assert!(ours.len() >= 8);
+        let mut checked = [0; 2];
+        for gpu in [false, true] {
+            let mut sv = Solver::new(&g, &s.community, ranges.clone(), vec![], true);
+            if gpu && !sv.use_gpu() {
+                continue;
+            }
+            for p in 0..2 {
+                let br = sv.best_response_values(p);
+                let ro: Vec<f64> = ranges[1 - p].iter().map(|&x| x as f64).collect();
+                let want: Vec<f64> = ours.iter().map(|&h| brute_br(&g, s, 0, p, holes()[h], &ro, &strength)).collect();
+                let scale = want.iter().fold(1.0f64, |m, x| m.max(x.abs()));
+                for (&h, &x) in ours.iter().zip(&want) {
+                    let y = br[h] as f64;
+                    assert!((x - y).abs() <= 1e-4 * scale, "spot {i} ({menu}) gpu {gpu} seat {p} hand {h}: solver {y}, rules engine {x}");
+                    checked[gpu as usize] += 1;
+                }
+            }
+        }
+        assert_eq!(checked[0], 2 * ours.len());
+        eprintln!("spot {i} ({menu}): {} values on the CPU, {} on the GPU, against the rules engine", checked[0], checked[1]);
+    }
 }

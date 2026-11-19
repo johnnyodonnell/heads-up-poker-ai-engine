@@ -17,6 +17,7 @@
 //!   serve --run NAME [--port 8790] [--web DIR]           the engine over HTTP + the web app
 //!   rangecheck --run NAME [--opp-run NAME] [--hands N]   the table's range estimates in self-play
 //!   scorecheck --run NAME [--opp-run NAME] [--spots N]   checks of advantage scoring on real spots
+//!   turncheck --run NAME [--opp-run A,B] [--configs ...]  live turn decisions vs the table, per setting
 //!
 //! eval, serve and livebench take --live off|river|turn (solve those
 //! streets live; default off) and --river-iters / --turn-iters.
@@ -25,6 +26,7 @@ mod play;
 mod rangecheck;
 mod scorecheck;
 mod serve;
+mod turncheck;
 mod train;
 mod util;
 
@@ -174,8 +176,9 @@ fn main() {
         Some("serve") => serve::serve_cmd(&args),
         Some("rangecheck") => rangecheck::rangecheck_cmd(&args),
         Some("scorecheck") => scorecheck::scorecheck_cmd(&args),
+        Some("turncheck") => turncheck::turncheck_cmd(&args),
         other => {
-            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | compare | probe | livebench | serve | rangecheck | scorecheck");
+            eprintln!("unknown subcommand {other:?}; expected: tree | pushfold | abstraction | train | export | eval | compare | probe | livebench | serve | rangecheck | scorecheck | turncheck");
             std::process::exit(2);
         }
     }

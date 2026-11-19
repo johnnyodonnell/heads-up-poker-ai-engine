@@ -141,7 +141,14 @@ not affect the app, whose matches start at 100bb. The hand logs are kept in
 
 With `--live river` or `--live turn` (on `hu eval`, `serve`, `livebench`), the
 engine solves turn and river decisions live instead of looking them up;
-preflop and the flop stay on the table. Off by default, and not served yet.
+preflop and the flop stay on the table. Off by default in the CLI. The app
+has been served with live river since 2026-11-19 (it passed test round 2):
+`$HU_HOME/live_mode` holds the mode (`serve.sh` reads it), and
+`GET /api/health` shows it:
+
+```sh
+cfr/box.sh 'echo river > $HU_HOME/live_mode && pm2 restart hu-engine'
+```
 
 How a live decision is made (`hu_cfr/src/live/`):
 
@@ -185,6 +192,7 @@ hu rangecheck --run v1c --opp-run v1a       # how well the table's range estimat
 hu scorecheck --run v1c --opp-run v1a --spots 3000   # checks of advantage scoring on real spots
 hu scorecheck --run v1c --opp-run v1a --stack 200 --spots 300 --play turn   # ... on spots of live turn play
 hu scorecheck --run v1c --opp-run v1a --stack 200 --spots 40 --live turn    # the scored identity, exactly
+hu turncheck --run v1c --opp-run v1c,v1a --stack 200 --spots 300 --configs "default;iters=600"   # live vs table per decision, per setting
 hu compare A.txt B.txt                      # paired difference of two saved matches
 ./panel.sh; ./panel_report.sh               # the test panel (round 2, below) and its results
 ```
@@ -463,6 +471,63 @@ have.
 
 So live river is the candidate to serve. Live turn costs a turn solve per
 turn decision (about a second on the GPU) for no measurable gain.
+
+### Why live turn adds nothing here
+
+Checked one cause at a time with `hu turncheck`. It scores the bot's live
+decision at real spots against the table's, with the same exact score as
+`hu eval` (the table playing on from there), for several solver settings on
+the same spots. The comparisons are paired, so hundreds of spots do what
+tens of thousands of hands do in a match.
+
+| The bot's first turn decision, bb/100 against the default solve (600 spots) | Change |
+|---|---|
+| 4× the iterations (exploitability 1.9% → 0.8% of the pot; 200 spots) | −0.2 ± 1.2 |
+| Opponent hedges (fit to Slumbot) off (200 spots) | −0.5 ± 2.1 |
+| Unsafe solving (200 spots) | −0.0 ± 1.1 |
+| Pot raises in the river inside turn solves | +0.0 ± 0.2 |
+| The full river menu inside turn solves (3× slower) | −0.1 ± 0.3 |
+| The full turn menu | +0.5 ± 0.9 |
+
+None of them matters. Nor is the turn solver wrong:
+`turn_best_responses_match_the_rules_engine` computes each hand's best
+response in turn solves (CPU and GPU) and by an independent walk through the
+rules engine (every action played, every river card dealt, every hand
+settled by `eval7`), and they agree. And the river after a live turn is
+played as well as in live river (+2.7 ± 4.3 bb/100 at the bot's first river
+decision; taking the opponent's river range from the opponent model instead
+of the turn solve changes it by −1.5 ± 3.6).
+
+What differs is how much there is to gain. Against these opponents, a live
+solve wins where its exact hands beat the table's hand groups, mostly when
+it answers the opponent's action. Per decision, in chips:
+
+| | Acting first | After the opponent acted |
+|---|---|---|
+| River (800 spots) | −0.13 ± 0.19 | +0.46 ± 0.50 |
+| Turn (800 spots) | −0.01 ± 0.10 | +0.12 ± 0.25 |
+
+A river decision is a showdown decision, where 2,000 hand groups blur exact
+strength the most: live and table differ by more than a chip at 27% of river
+spots and 9% of turn spots. On the turn one card is still to come, and the
+table's 5,000 groups, built from equity distributions, play close to the
+solve. Answering sizes off the table's menu exactly doesn't change that:
+against a v1c that bets 1.35× its sizes after the flop (`run:v1c@1.35`),
+which live play answers at their real size and the table translates, live
+turn decisions gain −3.1 ± 3.5 bb/100 over the table's (v1c: +0.8 ± 3.4).
+Live river, by contrast, does gain from them: against v1c@1.35 it beats the
+table by +6.2 ± 2.0 bb/100 (30,000 deals, scored), twice its +3.3 ± 1.3
+against v1c.
+
+A longer match wouldn't change this. Live turn − live river is −1.5 ± 1.9
+bb/100, which rules out a gain above +0.5 against these opponents; finding a
+gain of +1 would take about 250,000 deals. What matches against fixed bots
+can't see is exploitability. Published subgame solving made bots far harder
+to exploit (Libratus solved live from the turn on and after every opponent
+bet; in Brown & Sandholm 2017, re-solving left a test game 150 mbb/hand
+exploitable where action translation left 1,465), and our opponents never
+look for weaknesses. Measuring that needs an exploiter, such as a local best
+response (as DeepStack was measured), not more hands against fixed bots.
 
 ## Saved runs
 

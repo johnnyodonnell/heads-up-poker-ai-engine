@@ -108,6 +108,12 @@ pub struct LiveCfg {
     pub opp_temper: f32,
     /// The turn's menu in turn solves.
     pub turn_menu: LiveMenu,
+    /// The river's menu inside turn solves (48 copies of it, so lean).
+    pub river_in_turn: LiveMenu,
+    /// In turn mode, the opponent's range at the river from the opponent
+    /// model (the table's likelihoods, as live river play estimates it)
+    /// instead of from the turn solve's strategy for the opponent.
+    pub river_opp_table: bool,
     /// Safe re-solving (`safe`): every opponent hand is held to what it
     /// would get against the table, instead of trusting the estimated range.
     /// Falls back to the estimate where the hand has left the table's tree.
@@ -146,6 +152,8 @@ impl Default for LiveCfg {
             opp_sizes: true,
             opp_temper: 0.5,
             turn_menu: LiveMenu::turn_by_name("medium").unwrap(),
+            river_in_turn: LiveMenu::river_in_turn(),
+            river_opp_table: false,
             // Safe re-solving against best responses to the table, with the
             // likely hands counted too (`hu livebench --check-safe` on real
             // 200bb spots: hands beat their table value by 9x less than in
@@ -352,6 +360,10 @@ fn estimated_ranges(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKe
                 }
                 node = g.children(nd)[edge];
             }
+            if e.live_cfg.river_opp_table {
+                let t = e.table_ranges(v, &s.actions, k);
+                r[1 - v.bot] = t[1 - v.bot].clone();
+            }
             for x in r.iter_mut() {
                 mask(x, board);
             }
@@ -400,7 +412,7 @@ fn solve(e: &Engine, v: &View, s: &State, mode: LiveMode, key: HandKey, street: 
         }
     }
     let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
-    let g = subgame::build(&start, &forced, &menu, &LiveMenu::river_in_turn())?;
+    let g = subgame::build(&start, &forced, &menu, &e.live_cfg.river_in_turn)?;
     let mut fz = Vec::with_capacity(frozen.len());
     for (i, (j, sg)) in frozen.into_iter().enumerate() {
         let node = g.path[j];
@@ -550,7 +562,7 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
     }
     let start = state_at_street(v, k, street)?;
     let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
-    let g = subgame::build(&start, &v.actions[k..k + n], &menu, &LiveMenu::river_in_turn())?;
+    let g = subgame::build(&start, &v.actions[k..k + n], &menu, &e.live_cfg.river_in_turn)?;
     let fz = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
     let t0 = Instant::now();
     let mut sv = Solver::new(&g, &v.board[..board_len(street)], ranges, fz, e.live_cfg.parallel);
@@ -568,6 +580,65 @@ pub fn bench(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<(u64, f
     let ms = t0.elapsed().as_millis() as u64;
     let x = sv.exploitability();
     Ok((ms, x / g.pot.max(1) as f64 * 100.0, g.decisions(), sv.size()))
+}
+
+/// What `solve_now` returns: the bot's probabilities over the real actions,
+/// the solve's exploitability (% of the pot) and its time (ms).
+pub type SolvedNow = (Vec<(hu_core::rules::Action, f64)>, f64, u64);
+
+/// The bot's current decision solved now with the engine's live settings,
+/// outside the cache (for experiments that vary the settings): its
+/// probabilities over the real actions, the solve's exploitability in % of
+/// the pot, and the solve's time (ms). `tag` keeps any earlier solves this
+/// needs (the bot's own earlier actions on the street) apart from other
+/// settings' in the cache.
+pub fn solve_now(e: &Engine, v: &View, mode: LiveMode, tag: u64) -> Result<SolvedNow, String> {
+    let s = crate::engine::replay(v)?;
+    let street = s.street;
+    let k = street_start(&s.actions, street);
+    let n = s.actions.len() - k;
+    let mut st = Stats::default();
+    let key = (v.seed ^ tag, v.bot);
+    let ranges = street_ranges(e, v, &s, mode, key, street, &mut st)?;
+    let mut fz = Vec::new();
+    for (j, a) in v.actions[k..k + n].iter().enumerate() {
+        if a.seat == v.bot {
+            let prev = solve(e, v, &s, mode, key, street, j, &mut st)?;
+            fz.push((j, prev.strat[&prev.g.path[j]].clone()));
+        }
+    }
+    let start = state_at_street(v, k, street)?;
+    let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
+    let g = subgame::build(&start, &v.actions[k..k + n], &menu, &e.live_cfg.river_in_turn)?;
+    if g.path.len() != n + 1 {
+        return Err("live solve: no decision at the current node".into());
+    }
+    let fz = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
+    let t0 = Instant::now();
+    let mut sv = Solver::new(&g, &v.board[..board_len(street)], ranges, fz, e.live_cfg.parallel);
+    let _slot = if e.live_cfg.gpu && street == Street::Turn { gpu::Slot::try_take(e.live_cfg.gpu_slots) } else { None };
+    if _slot.is_some() {
+        sv.use_gpu();
+    }
+    floor_opponent_line(&mut sv, &g, &v.actions[k..k + n], v.bot, e.live_cfg.opp_line);
+    if e.live_cfg.safe != SafeMode::Off {
+        let alt = safe::table_values(e, v, &s.actions, k, &sv.ranges[v.bot], sv.boards(), sv.river_cards(), e.live_cfg.safe == SafeMode::Best, g.pot, e.live_cfg.parallel);
+        if let Some(alt) = alt {
+            sv.set_gadget(1 - v.bot, alt, e.live_cfg.safe_weight);
+        }
+    }
+    sv.run(if street == Street::River { e.live_cfg.river_iters } else { e.live_cfg.turn_iters });
+    let ms = t0.elapsed().as_millis() as u64;
+    let x = sv.exploitability() / g.pot.max(1) as f64 * 100.0;
+    let node = g.current();
+    let nd = &g.nodes[node as usize];
+    if nd.kind != Kind::Decision(v.bot as u8) {
+        return Err("live solve: the current node is not the bot's".into());
+    }
+    let sg = sv.strategy(node);
+    let h = hand(v.hole);
+    let dist = g.actions(nd).iter().enumerate().map(|(a, &act)| (act, sg[a * H + h] as f64)).collect();
+    Ok((dist, x, ms))
 }
 
 /// What `gpu_check` measured on one spot.
@@ -605,7 +676,7 @@ pub fn gpu_check(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<Gpu
         }
     }
     let start = state_at_street(v, k, street)?;
-    let g = subgame::build(&start, &v.actions[k..k + n], &e.live_cfg.turn_menu, &LiveMenu::river_in_turn())?;
+    let g = subgame::build(&start, &v.actions[k..k + n], &e.live_cfg.turn_menu, &e.live_cfg.river_in_turn)?;
     let fz: Vec<(u32, Vec<f32>)> = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
     let board = &v.board[..board_len(street)];
     let solve_on = |gpu: bool| -> Result<(u64, f64, HashMap<u32, Vec<f32>>), String> {
@@ -691,7 +762,7 @@ pub fn safe_check(e: &Engine, v: &View, mode: LiveMode, iters: u32) -> Result<Sa
     }
     let start = state_at_street(v, k, street)?;
     let menu = if street == Street::River { LiveMenu::river() } else { e.live_cfg.turn_menu.clone() };
-    let g = subgame::build(&start, &v.actions[k..k + n], &menu, &LiveMenu::river_in_turn())?;
+    let g = subgame::build(&start, &v.actions[k..k + n], &menu, &e.live_cfg.river_in_turn)?;
     let fz: Vec<(u32, Vec<f32>)> = fz.into_iter().map(|(j, sg)| (g.path[j], sg)).collect();
     let board = &v.board[..board_len(street)];
     let opp = 1 - v.bot;
