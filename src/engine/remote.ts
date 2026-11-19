@@ -6,6 +6,8 @@
 //   await bestMove(state)       // -> an Action for state.toAct
 //   onDecision(listener)        // the debug info of every decision
 //   thinkingMs(state)           // how long the thinking bar runs for this decision
+//   logHand(state)              // send a finished hand to the box's hand log
+//   newMatch()                  // New Game: later hands get new ids
 
 import type { Action, EngineState } from "./game";
 
@@ -51,8 +53,19 @@ export interface BotDecision {
 
 export class EngineError extends Error {}
 
-// One id per page load, so hand ids are unique across matches.
+// Hand ids: one random id per page load, a game count (New Game starts the
+// hand count over) and the hand number, so ids are unique across matches.
+// The engine seeds a hand's bet-size translation from its id.
 const matchId = Math.random().toString(36).slice(2, 10);
+let game = 1;
+
+function handId(state: EngineState): string {
+  return `${matchId}-${game}-${state.handNumber}`;
+}
+
+export function newMatch(): void {
+  game++;
+}
 
 type Listener = (d: BotDecision) => void;
 let listeners: Listener[] = [];
@@ -87,7 +100,7 @@ export function thinkingMs(state: EngineState): number {
 export async function bestMove(state: EngineState): Promise<Action> {
   const bot = state.toAct;
   const body = {
-    handId: `${matchId}-${state.handNumber}`,
+    handId: handId(state),
     bot,
     button: state.button,
     // Stacks at the start of the hand, before the blinds.
@@ -125,4 +138,51 @@ export async function bestMove(state: EngineState): Promise<Action> {
       : { type: data.action.type, amount: data.action.amount };
   for (const l of listeners) l({ hand: state.handNumber, action, debug: data.debug });
   return action;
+}
+
+const logged = new Set<string>();
+
+// Send a finished hand (phase hand-over or match-over) to the box's hand log
+// ($HU_HOME/logs/hands.jsonl): both players' cards, the board, every action
+// at its real size, and the result. Once per hand; failures are ignored (the
+// log is for analysis, never in the way of play).
+export function logHand(state: EngineState): void {
+  if (state.phase !== "hand-over" && state.phase !== "match-over") return;
+  const id = handId(state);
+  if (logged.has(id)) return;
+  logged.add(id);
+  const won = new Map<number, number>();
+  for (const w of state.results?.winners ?? []) {
+    won.set(w.seat, (won.get(w.seat) ?? 0) + w.amountWon);
+  }
+  const record = {
+    handId: id,
+    handNumber: state.handNumber,
+    time: new Date().toISOString(),
+    button: state.button,
+    // By seat. A player's commit stays on them until the next deal, so the
+    // stack the hand started with is what they end with, less what they
+    // won, plus what they put in.
+    players: state.players.map((p) => ({
+      name: p.name,
+      human: p.isHuman,
+      startStack: p.stack - (won.get(p.id) ?? 0) + p.commit,
+      endStack: p.stack,
+      hole: p.holeCards.map((c) => c.id),
+      status: p.status,
+    })),
+    board: state.community.map((c) => c.id),
+    actions: state.actions,
+    results: state.results && {
+      reveal: state.results.reveal,
+      winners: state.results.winners,
+      pots: state.results.pots.map((p) => ({ amount: p.amount, winners: p.winners })),
+    },
+    matchOver: state.phase === "match-over",
+  };
+  void fetch("/api/hand", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(record),
+  }).catch(() => {});
 }

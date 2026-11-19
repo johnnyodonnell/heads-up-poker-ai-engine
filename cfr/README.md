@@ -76,6 +76,17 @@ The service (port 8790) is started once with
 `pm2 start cfr/pm2.config.cjs && pm2 save` from `repo/`; `cfr/deploy_web.sh`
 updates the web app it serves. `GET /api/health` shows what's loaded.
 
+Logs of play in the app, in `$HU_HOME/logs/`:
+
+| File | One line per | Holds |
+|---|---|---|
+| `engine.log` | decision (text) | the bot's cards, board, choice, any fallback |
+| `decisions.jsonl` | decision | the app's request (the hand so far at its real sizes) and the engine's debug output: how the real betting was translated, the options and probabilities, any fallback, live-solve stats |
+| `hands.jsonl` | finished hand | both players' cards and stacks, the board, every action, the result (the app sends it with `POST /api/hand` when the hand ends) |
+
+Hand ids are `PAGELOAD-GAME-HAND` (a random id per page load, the game's
+count since then, the hand number).
+
 ## Results
 
 All in bb/100 from the engine's side, ± a 95% interval.

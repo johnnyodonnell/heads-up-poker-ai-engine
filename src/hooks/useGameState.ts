@@ -9,7 +9,7 @@ import {
 import type { EngineState } from "../engine/game";
 import { loadTable, saveTable } from "../engine/saved";
 // The bot's engine. Swap this one import to plug in a different engine.
-import { bestMove, onDecision, thinkingMs } from "../engine/remote";
+import { bestMove, logHand, newMatch, onDecision, thinkingMs } from "../engine/remote";
 import type { BotDecision } from "../engine/remote";
 import { toGameState, fromBetAction } from "../engine/adapt";
 
@@ -128,6 +128,7 @@ export function useGameState(): {
         const end = await advance(start, onThink);
         if (generation.current !== my) return;
         set(end);
+        logHand(end);
       } catch (err) {
         if (generation.current !== my) return;
         if (err instanceof AdvanceError) {
@@ -166,6 +167,7 @@ export function useGameState(): {
 
   const newGame = useCallback(() => {
     generation.current++;
+    newMatch();
     set(createTable());
     setBusy(false);
     setThinking(null);
