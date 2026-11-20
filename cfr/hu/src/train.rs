@@ -1,9 +1,12 @@
 //! `hu train` / `hu export`: train one stack depth with MCCFR (resumable),
 //! then export its strategy for the engine.
 //!
-//!   hu train --run NAME --abs ABS --stack 200 --iters 1e9 [--menu lean] [--seed 1]
+//!   hu train --run NAME --abs ABS --stack 200 --iters 1e9 [--menu lean] [--seed 1] [--scale-iters]
 //!       runs/NAME/s<stack>/solver.ckpt   (checkpoint, every 30 min + at the end)
 //!       strategies/NAME/s<stack>/        (exported at the end)
+//!       --scale-iters multiplies --iters by the tree's size against the lean
+//!       menu's at the same depth, so a bigger menu gets as many updates per
+//!       information set as lean would
 //!   hu export --run NAME --abs ABS --stack 200 [--menu lean]
 //!       export from the latest checkpoint (e.g. while training continues)
 
@@ -52,11 +55,18 @@ fn export(st: &Setup, tree: hu_cfr::game::TreeGame, solver: &Solver) {
 
 pub fn train_cmd(args: &[String]) {
     let st = setup(args);
-    let iters: u64 = num(args, "--iters", 100_000_000);
+    let mut iters: u64 = num(args, "--iters", 100_000_000);
     let seed: u64 = num(args, "--seed", 1);
     std::fs::create_dir_all(&st.run_dir).expect("run dir");
     let abs = Abstraction::load(&hu_home().join("data").join(&st.abs_name)).expect("load abstraction");
     let tree = tree::build(st.stack, &st.menu, abs.buckets());
+    if args.iter().any(|a| a == "--scale-iters") {
+        let lean = tree::build(st.stack, &Menu::lean(), abs.buckets());
+        let ratio = tree.n_entries as f64 / lean.n_entries as f64;
+        let scaled = (iters as f64 * ratio).round() as u64;
+        log(format!("--scale-iters: {} entries, lean {} ({ratio:.3}x): {iters} -> {scaled} iterations", tree.n_entries, lean.n_entries));
+        iters = scaled;
+    }
     let ckpt = st.run_dir.join("solver.ckpt");
     let mut solver = if ckpt.exists() {
         let s = Solver::load(&tree, &ckpt).expect("load checkpoint");
