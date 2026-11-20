@@ -50,17 +50,24 @@ impl Menu {
     ///   on the flop and turn, a 6bb open and a 2× 3-bet preflop; the river
     ///   stays lean (it is solved live, the table only supplies its values).
     /// - `wide-river`: `wide` with the river as wide as the turn.
+    /// - `wide-flop`: `wide` before the turn only; the turn and river lean
+    ///   (served with live turn, the table's turn and river play no hands:
+    ///   they shape the flop's training and the live solves' safe values).
     pub fn candidate(name: &str) -> Option<Menu> {
         let mut m = Menu::lean();
         m.name = name.into();
         m.allin_past_cap = true;
         match name {
             "cap" => {}
-            "wide" | "wide-river" => {
+            "wide" | "wide-river" | "wide-flop" => {
                 m.preflop = vec![vec![0.5, 0.75, 1.0, 1.5, 2.5], vec![0.75, 1.25, 2.0], vec![0.75]];
                 let rich = vec![vec![0.33, 0.66, 1.0, 1.5, 2.5], vec![0.5, 1.0]];
-                let river = if name == "wide" { m.postflop.clone() } else { rich.clone() };
-                m.by_street = Some([rich.clone(), rich, river]);
+                let lean = m.postflop.clone();
+                m.by_street = Some(match name {
+                    "wide" => [rich.clone(), rich, lean],
+                    "wide-river" => [rich.clone(), rich.clone(), rich],
+                    _ => [rich, lean.clone(), lean],
+                });
             }
             _ => return None,
         }

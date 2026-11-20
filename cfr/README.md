@@ -699,6 +699,60 @@ structural fix is in the menu instead: with all-in offered past the raise
 cap, a 5-bet jam is in the tree, and the bot both learns to 4-bet less
 lightly and answers 5-bets from its training (the `cap` menu, `hu tree --menu cap`).
 
+## A v2 menu: candidates and training time
+
+LBR's edge against the served bot comes from the lean menu: preflop and on
+the flop (the table still plays them), its min-raises are read as pot-size
+raises, its overbets partly as all-ins, and the raise cap leaves no 5-bet.
+`Menu::candidate` defines menus that close those gaps, for a retrain
+(`hu tree --menu NAME` sizes them; `hu train --menu NAME` trains them):
+
+| Menu | Adds to lean |
+|---|---|
+| `cap` | all-in stays an option past the raise cap (a 4-bet can be 5-bet all-in; a raise beyond the cap lands on a node) |
+| `wide-flop` | `cap`, plus a 6bb open and a 2× 3-bet preflop, and on the flop bets of 1.5× and 2.5× the pot and half-pot raises; turn and river lean |
+| `wide` | `wide-flop`'s sizes on the turn too |
+| `wide-river` | `wide` on the river too |
+
+With live turn served, the table's turn and river play no hands: they shape
+how the flop is trained and give the live solves their safe values. So
+`wide-flop` targets what's left to exploit at the least cost.
+
+Entries (regret and strategy tables, 16 bytes each) with the a10k hand
+groups:
+
+| Depth | lean (v1c) | cap | wide-flop | wide | wide-river |
+|---|---|---|---|---|---|
+| 100bb | 352M (5.2 GiB) | 359M | 849M (12.7 GiB) | 1,322M (19.7 GiB) | 1,624M (24.2 GiB) |
+| 70bb | 258M | 262M | 563M | 815M | 960M |
+| 50bb | 180M | 182M | 357M | 496M | 570M |
+| 35bb | 120M | 121M | 213M | 276M | 307M |
+| 25bb | 79M | 79M | 131M | 165M | 180M |
+| 12bb / 6bb | 28M / 6M | the same | 37M / 7M | 40M / 7M | 41M / 7M |
+
+Training speed at 100bb (7 minutes each on the box, the same schedule, time
+per iteration against lean at the same iteration count): `cap` 1.0×,
+`wide-flop` 1.4×, `wide` 1.83×, `wide-river` 2.1×.
+
+Estimated training time for every depth (v1c took 9.3 h: 3.8 h at 100bb),
+scaling v1c's real times per depth by the slowdown (assumed to shrink at
+shallower depths with the tree's growth) and either keeping v1c's iteration
+counts or scaling them with the tree (as many updates per information set):
+
+| Menu | 100bb alone, v1c's iterations | Every depth, v1c's iterations | Every depth, iterations scaled to the tree |
+|---|---|---|---|
+| lean (v1c, measured) | 3.8 h | 9.3 h | |
+| `cap` | 3.8 h | **9.3 h** | 9.4 h |
+| `wide-flop` | 5.3 h | **12.3 h** | 26.8 h |
+| `wide` | 6.9 h | **15.3 h** | 49.3 h |
+| `wide-river` | 7.9 h | 17.1 h | 66.0 h |
+
+v1c's iteration count was probably more than it needed (v1c against v1b,
+which had 2.5× fewer iterations and coarser hand groups: +1.0 ± 2.6 bb/100),
+so the first column is the realistic one; the second is the cautious bound.
+Memory (one depth at a time) and disk (about 4× v1c's 16 GB of checkpoints
+for `wide`) fit on the box.
+
 ## Saved runs
 
 Trained runs are too big for git (v1c is 7.2 GB of card abstraction, 1 GB
