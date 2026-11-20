@@ -102,6 +102,7 @@ All in bb/100 from the engine's side, ± a 95% interval.
 | v1a (checkpoint A) | a200: 200/200/200 | 300M, 100bb only | 12 min | 2026-11-16 |
 | v1b (checkpoint B) | a2k: 2000/2000/1000 | 2B | 3.6 h | 2026-11-16 |
 | v1c (checkpoint C) | a10k: 10000/5000/2000 | 5B | 9.3 h | since 2026-11-17 |
+| v1d (menu `wide-river`) | a10k | 23.1B (scaled to the tree: `MENU=wide-river SCALE=tree train_all.sh v1d a10k 5e9`) | training since 2026-11-19 20:26, estimated ~66 h | |
 
 ### Against the scripted bots
 
