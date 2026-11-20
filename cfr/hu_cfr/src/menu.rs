@@ -4,7 +4,8 @@
 //! old action space used): raise-to = current bet + f × (pot + to-call). The
 //! k-th bet/raise on a street uses list k (the last list repeats). All-in is
 //! always offered when a raise is legal, and counts as a raise; after
-//! `max_raises` bets/raises on a street only fold/call remain.
+//! `max_raises` bets/raises on a street only fold/call remain, or (with
+//! `allin_past_cap`) fold/call/all-in.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +15,14 @@ pub struct Menu {
     pub preflop: Vec<Vec<f64>>,
     pub postflop: Vec<Vec<f64>>,
     pub max_raises: u32,
+    /// Per street after the flop (flop, turn, river): lists that replace
+    /// `postflop` there, when given.
+    #[serde(default)]
+    pub by_street: Option<[Vec<Vec<f64>>; 3]>,
+    /// All-in stays an option past `max_raises` (so a 4-bet can be 5-bet
+    /// all-in, and a raise beyond the cap has a node to land on).
+    #[serde(default)]
+    pub allin_past_cap: bool,
 }
 
 impl Menu {
@@ -29,19 +38,49 @@ impl Menu {
             preflop: vec![vec![0.5, 0.75, 1.0, 1.5], vec![0.75, 1.25], vec![0.75]],
             postflop: vec![vec![0.33, 0.66, 1.0], vec![1.0]],
             max_raises: 3,
+            by_street: None,
+            allin_past_cap: false,
         }
+    }
+
+    /// Candidates for v2, aimed at the holes local best response found in
+    /// the lean menu (`hu lbr`). Each adds to the one before:
+    /// - `cap`: lean, with all-in past the raise cap (5-bets, fourth raises).
+    /// - `wide`: also small raises (half pot) and overbets (1.5×, 2.5× pot)
+    ///   on the flop and turn, a 6bb open and a 2× 3-bet preflop; the river
+    ///   stays lean (it is solved live, the table only supplies its values).
+    /// - `wide-river`: `wide` with the river as wide as the turn.
+    pub fn candidate(name: &str) -> Option<Menu> {
+        let mut m = Menu::lean();
+        m.name = name.into();
+        m.allin_past_cap = true;
+        match name {
+            "cap" => {}
+            "wide" | "wide-river" => {
+                m.preflop = vec![vec![0.5, 0.75, 1.0, 1.5, 2.5], vec![0.75, 1.25, 2.0], vec![0.75]];
+                let rich = vec![vec![0.33, 0.66, 1.0, 1.5, 2.5], vec![0.5, 1.0]];
+                let river = if name == "wide" { m.postflop.clone() } else { rich.clone() };
+                m.by_street = Some([rich.clone(), rich, river]);
+            }
+            _ => return None,
+        }
+        Some(m)
     }
 
     pub fn by_name(name: &str) -> Option<Menu> {
         match name {
             "lean" => Some(Menu::lean()),
-            _ => None,
+            other => Menu::candidate(other),
         }
     }
 
     /// Sizes for the `raises`-th bet/raise on `street` (0 = preflop).
     pub fn sizes(&self, street: usize, raises: u32) -> &[f64] {
-        let lists = if street == 0 { &self.preflop } else { &self.postflop };
+        let lists = match (street, &self.by_street) {
+            (0, _) => &self.preflop,
+            (s, Some(b)) => &b[s - 1],
+            (_, None) => &self.postflop,
+        };
         &lists[(raises as usize).min(lists.len() - 1)]
     }
 }

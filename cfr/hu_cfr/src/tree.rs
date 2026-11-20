@@ -67,6 +67,13 @@ fn decision(g: &mut TreeGame, s: State, raises: u32, menu: &Menu) -> u32 {
         let to = legal.max_raise_to;
         let frac = (to - s.current_bet) as f32 / pac as f32;
         opts.push((Act::AllIn { to, frac }, Action::new(ActionType::AllIn)));
+    } else if legal.can_raise && menu.allin_past_cap {
+        let me = &s.players[i];
+        let pot_total = s.pot + s.players.iter().map(|p| p.bet).sum::<i32>();
+        let pac = pot_total + (s.current_bet - me.bet);
+        let to = legal.max_raise_to;
+        let frac = (to - s.current_bet) as f32 / pac as f32;
+        opts.push((Act::AllIn { to, frac }, Action::new(ActionType::AllIn)));
     }
 
     let mut kids = Vec::with_capacity(opts.len());
