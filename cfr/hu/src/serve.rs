@@ -207,6 +207,7 @@ async fn health(State(app): State<Arc<App>>) -> Json<Value> {
         "riverIters": engine.live_cfg.river_iters,
         "turnIters": engine.live_cfg.turn_iters,
         "safe": engine.live_cfg.safe.name(),
+        "fallback": engine.fallback.name(),
         "buckets": engine.abs.buckets(),
         "strategies": engine.strategies.iter().map(|s| json!({
             "stackBb": s.meta.stack / 2,

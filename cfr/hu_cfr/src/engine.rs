@@ -14,11 +14,19 @@
 //!
 //! When the abstract tree can't follow the real hand (a fourth raise on one
 //! street, a real raise mapped to an abstract all-in, ...) the engine falls
-//! back to a simple equity heuristic and says so in the debug output. The
-//! heuristic is deterministic (exact equity on the turn and river, seeded
-//! Monte Carlo before), so every decision's action probabilities are known
-//! exactly (`table_play`, `table_play_all`): what advantage scoring
-//! (`crate::score`) needs.
+//! back to a heuristic and says so in the debug output. By default
+//! (`Fallback::Equity`) it plays on equity against a random hand and the pot
+//! odds, which calls 5-bets with nearly any 4-bet hand. `Fallback::Range`
+//! plays on equity against the opponent's estimated range, never folding more
+//! than a bluff of the size it faces needs (`range_rule`), and reads a raise
+//! past the raise cap as a raise for value: it folds 4-bet bluffs to 5-bets,
+//! but loses to opponents who raise with anything (−95 bb/100 against the
+//! maniac bot) and makes the bot no harder for local best response to
+//! exploit, so it isn't the default (cfr/README.md, "The fallback"). Both are
+//! deterministic (exact equity on the turn and river, seeded sampling
+//! before), so every decision's action probabilities are known exactly
+//! (`table_play`, `table_play_all`): what advantage scoring (`crate::score`)
+//! and local best response (`crate::lbr`) need.
 
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
@@ -118,6 +126,11 @@ pub struct Engine {
     /// trained): a test opponent that plays the table's strategy at sizes
     /// off its menu (`run:NAME@SCALE` in `hu eval`).
     pub bet_scale: f32,
+    /// What plays where the table can't follow the real hand.
+    pub fallback: Fallback,
+    /// Range fallback: the share of a raise past the raise cap read as a
+    /// raise for value (the rest: the opponent's estimated range as it is).
+    pub fallback_value: f64,
 }
 
 /// Abstract player of a real seat: 0 = small blind / button, 1 = big blind.
@@ -390,6 +403,195 @@ fn fallback_equity(hole: [Card; 2], board: &[Card], seed: u64, n_actions: usize)
     }
 }
 
+/// Every hand's showdown share (holes() order; 1 win, ½ tie) against a
+/// weighted opponent range, averaged over every completion of `board` (the
+/// turn and river: exact; preflop: `samples` boards drawn with `seed`), each
+/// completion weighted by the opponent weight it leaves the hand. Hands
+/// touching the board get 0.5 (and must not be used).
+pub fn equity_vs(board: &[Card], opp: &[f32], samples: usize, seed: u64) -> Vec<f64> {
+    equity_on(&runout_boards(board, samples, seed), opp)
+}
+
+/// Every completion of `board` (preflop: `samples` drawn with `seed`),
+/// sorted for showdowns, to evaluate several ranges on (`equity_on`).
+pub fn runout_boards(board: &[Card], samples: usize, seed: u64) -> Vec<Board> {
+    let rest: Vec<Card> = (0..52u8).filter(|c| !board.contains(c)).collect();
+    let mut runouts: Vec<[Card; 5]> = Vec::new();
+    let mut full = [0u8; 5];
+    full[..board.len()].copy_from_slice(board);
+    match 5 - board.len() {
+        0 => runouts.push(full),
+        1 => {
+            for &r in &rest {
+                full[4] = r;
+                runouts.push(full);
+            }
+        }
+        2 => {
+            for i in 0..rest.len() {
+                for j in i + 1..rest.len() {
+                    full[3] = rest[i];
+                    full[4] = rest[j];
+                    runouts.push(full);
+                }
+            }
+        }
+        _ => {
+            let mut rng = SmallRng::seed_from_u64(seed);
+            for _ in 0..samples.max(1) {
+                let mut b = [0u8; 5];
+                for (k, i) in rand::seq::index::sample(&mut rng, rest.len(), 5 - board.len()).into_iter().enumerate() {
+                    b[board.len() + k] = rest[i];
+                }
+                b[..board.len()].copy_from_slice(board);
+                runouts.push(b);
+            }
+        }
+    }
+    runouts.into_iter().map(Board::new).collect()
+}
+
+/// `equity_vs` on boards from `runout_boards`.
+pub fn equity_on(boards: &[Board], opp: &[f32]) -> Vec<f64> {
+    use crate::live::showdown::{fold, mask};
+    let hs = holes();
+    let mut num = vec![0f64; H];
+    let mut den = vec![0f64; H];
+    let mut net = vec![0f32; H];
+    let mut wh = vec![0f32; H];
+    for bd in boards {
+        let cards = &bd.cards;
+        let mut w = opp.to_vec();
+        mask(&mut w, cards);
+        bd.showdown(&w, 1.0, &mut net);
+        fold(&w, 1.0, &mut wh);
+        for (h, &[a, b]) in hs.iter().enumerate() {
+            if cards.contains(&a) || cards.contains(&b) {
+                continue;
+            }
+            num[h] += 0.5 * (wh[h] as f64 + net[h] as f64);
+            den[h] += wh[h] as f64;
+        }
+    }
+    num.iter().zip(&den).map(|(&n, &d)| if d > 0.0 { n / d } else { 0.5 }).collect()
+}
+
+/// Which fallback plays where the abstract tree can't follow the real hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fallback {
+    /// The original heuristic: equity against a random hand, pot odds.
+    Equity,
+    /// Equity against the opponent's estimated range, with a guard against
+    /// folding more than a bluff of the size it faces needs (`range_rule`);
+    /// a raise past the raise cap read partly as a raise for value
+    /// (`Engine::fallback_value`).
+    Range,
+}
+
+impl Fallback {
+    pub fn parse(s: &str) -> Option<Fallback> {
+        match s {
+            "equity" => Some(Fallback::Equity),
+            "range" => Some(Fallback::Range),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Fallback::Equity => "equity",
+            Fallback::Range => "range",
+        }
+    }
+}
+
+/// Share of "any hand" mixed into the opponent's estimated range in the
+/// range fallback (as live solving does: `LiveCfg::opp_mix`).
+const FALLBACK_OPP_MIX: f32 = 0.1;
+/// Boards sampled for preflop equities in the range fallback.
+const FALLBACK_PREFLOP_BOARDS: usize = 600;
+
+/// The spot the range fallback decides, in chips.
+#[derive(Clone, Copy, Debug)]
+pub struct Spot {
+    /// Everything in the middle (gathered pot plus every street bet).
+    pub pot: i32,
+    pub to_call: i32,
+    /// What each player could still put in after the call (the smaller).
+    pub behind: i32,
+    /// The bet or raise faced: the chips it added and the pot before it
+    /// (its bluff breaks even when folded to `added / (pot_before + added)`).
+    pub faced: Option<(i32, i32)>,
+    pub can_raise: bool,
+}
+
+/// What the range fallback does with a hand.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Play {
+    Fold,
+    Check,
+    Call,
+    /// Bet about the pot (all-in if that's most of the stack).
+    BetPot,
+    AllIn,
+}
+
+/// The range fallback's rule for every hand at once: `eq` is each hand's
+/// equity against the opponent's estimated range, `mine` the bot's own range
+/// (for the guard), `valid` which hands can exist on this board.
+///
+/// Facing a bet it continues with every hand whose equity covers the price:
+/// in a shallow spot (no more behind than the pot) the price of getting all
+/// the chips in, deeper the pot odds plus 5% (equity it may not realize).
+/// The guard: if that would fold more of its range than a pure bluff of the
+/// faced size needs to break even, it also continues with the next-best
+/// hands until it doesn't (a bluff of that size then can't profit at once).
+/// It jams the strongest continuing hands (equity ≥ 55% shallow, 70% deep).
+/// Not facing a bet, it bets about the pot with equity ≥ 60% and checks the
+/// rest. One threshold per decision, so the play is monotone in equity.
+pub fn range_rule(eq: &[f64], mine: &[f32], valid: &[bool], spot: &Spot) -> Vec<Play> {
+    let shallow = spot.behind <= spot.pot + spot.to_call;
+    if spot.to_call <= 0 {
+        return (0..eq.len())
+            .map(|h| if valid[h] && spot.can_raise && eq[h] >= 0.6 { Play::BetPot } else { Play::Check })
+            .collect();
+    }
+    let after = (spot.pot + spot.to_call) as f64;
+    let need = if shallow {
+        (spot.to_call + spot.behind) as f64 / (after + 2.0 * spot.behind as f64)
+    } else {
+        spot.to_call as f64 / after + 0.05
+    };
+    // The guard: the equity the bot's range must be continued down to.
+    let mut cut = need;
+    if let Some((added, before)) = spot.faced {
+        let max_fold = added as f64 / (before + added).max(1) as f64;
+        let mut order: Vec<usize> = (0..eq.len()).filter(|&h| valid[h] && mine[h] > 0.0).collect();
+        order.sort_by(|&a, &b| eq[b].partial_cmp(&eq[a]).unwrap());
+        let total: f64 = order.iter().map(|&h| mine[h] as f64).sum();
+        let mut kept = 0.0;
+        for &h in &order {
+            if kept >= (1.0 - max_fold) * total - 1e-12 {
+                break;
+            }
+            kept += mine[h] as f64;
+            cut = cut.min(eq[h]);
+        }
+    }
+    let jam = if shallow { 0.55f64.max(need) } else { 0.7 };
+    (0..eq.len())
+        .map(|h| {
+            if !valid[h] || eq[h] < cut {
+                Play::Fold
+            } else if spot.can_raise && eq[h] >= jam {
+                Play::AllIn
+            } else {
+                Play::Call
+            }
+        })
+        .collect()
+}
+
 /// The equity heuristic's action.
 fn fallback_action(eq: f64, legal: &Legal, s: &State) -> Action {
     let pot_total = s.pot + s.players.iter().map(|p| p.bet).sum::<i32>();
@@ -499,6 +701,75 @@ impl Engine {
         to_real(&scaled, legal, s.current_bet, pac)
     }
 
+    /// The range fallback at `s` for every hand (holes() order): the real
+    /// action each would take (None for hands touching the board), each
+    /// hand's equity against the opponent's estimated range, and the spot.
+    /// Ranges are the table's estimates along the translated history up to
+    /// where the real hand left the tree (`table_ranges`, the same hedges
+    /// live solving uses), the opponent's mixed with some "any hand" (and,
+    /// facing a raise past the tree's raise cap, cut to its hands ahead of
+    /// the bot's range). Deterministic per hand seed.
+    pub fn fallback_range_all(&self, s: &State, stacks: [i32; 2], seed: u64) -> (Vec<Option<Action>>, Vec<f64>, Spot) {
+        let seat = s.to_act as usize;
+        let legal = s.legal().expect("a decision");
+        let v = view_of(s, seat, stacks, seed);
+        let [mut r0, mut r1] = self.table_ranges(&v, &s.actions, s.actions.len());
+        let board = &s.community;
+        crate::live::showdown::mask(&mut r0, board);
+        crate::live::showdown::mask(&mut r1, board);
+        let (mine, mut opp) = if seat == 0 { (r0, r1) } else { (r1, r0) };
+        let hs = holes();
+        let valid: Vec<bool> = hs.iter().map(|&[a, b]| !board.contains(&a) && !board.contains(&b)).collect();
+        let n_valid = valid.iter().filter(|&&x| x).count() as f32;
+        let total: f32 = opp.iter().sum();
+        for (h, x) in opp.iter_mut().enumerate() {
+            let any = if valid[h] { 1.0 } else { 0.0 };
+            *x = if total > 0.0 { (1.0 - FALLBACK_OPP_MIX) * *x / total * n_valid + FALLBACK_OPP_MIX * any } else { any };
+        }
+        // A raise past the tree's raise cap (a 5-bet preflop, a fourth raise
+        // after the flop) is one the table has no model of: it is read as a
+        // raise for value, from the opponent's hands ahead of the bot's
+        // range. Bluffs are the guard's business (`range_rule` never folds
+        // more than a bluff of the size needs). Other bets keep the table's
+        // estimate (after a size read as all-in, say, they are often bluffs).
+        let boards = runout_boards(board, FALLBACK_PREFLOP_BOARDS, hand_seed(seed, 0x2_0000 + s.actions.len()));
+        let cap = crate::menu::Menu::by_name(&self.pick(stacks[0].min(stacks[1])).meta.menu).map_or(3, |m| m.max_raises) as usize;
+        let raises = s.actions.iter().filter(|a| a.street == s.street && matches!(a.kind, ActionType::Bet | ActionType::Raise)).count();
+        let share = self.fallback_value as f32;
+        if raises > cap && share > 0.0 && mine.iter().sum::<f32>() > 0.0 {
+            let ahead = equity_on(&boards, &mine);
+            let value: Vec<f32> = opp.iter().zip(&ahead).map(|(&x, &e)| if e >= 0.5 { x } else { 0.0 }).collect();
+            let (v, o): (f32, f32) = (value.iter().sum(), opp.iter().sum());
+            if v > 0.0 {
+                for (x, y) in opp.iter_mut().zip(&value) {
+                    *x = share * y / v * o + (1.0 - share) * *x;
+                }
+            }
+        }
+        let eq = equity_on(&boards, &opp);
+        let me = &s.players[seat];
+        let other = &s.players[1 - seat];
+        let pot = s.pot + s.players.iter().map(|p| p.bet).sum::<i32>();
+        let faced = s.actions.last().filter(|a| a.seat != seat && matches!(a.kind, ActionType::Bet | ActionType::Raise)).map(|a| (a.added, a.pot_before));
+        let spot = Spot { pot, to_call: legal.to_call, behind: (me.stack - legal.to_call).min(other.stack).max(0), faced, can_raise: legal.can_raise };
+        let plays = range_rule(&eq, &mine, &valid, &spot);
+        let pac = pot + (s.current_bet - me.bet);
+        let actions = plays
+            .iter()
+            .zip(&valid)
+            .map(|(p, &ok)| {
+                ok.then(|| match p {
+                    Play::Fold => Action::new(ActionType::Fold),
+                    Play::Check => Action::new(ActionType::Check),
+                    Play::Call => Action::new(ActionType::Call),
+                    Play::BetPot => to_real(&Act::Bet { to: 0, frac: 1.0 }, &legal, s.current_bet, pac),
+                    Play::AllIn => Action::new(ActionType::AllIn),
+                })
+            })
+            .collect();
+        (actions, eq, spot)
+    }
+
     /// The table's play at real state `s` for the seat to act holding
     /// `hole`, before sampling (what `decide` samples from): `stacks` are
     /// the hand's starting stacks, `seed` its seed (translation, fallback).
@@ -524,9 +795,27 @@ impl Engine {
             Ok(node) => node,
             Err(why) => {
                 dbg.fallback = Some(why.into());
-                let eq = fallback_equity(hole, &s.community, seed, s.actions.len());
-                let action = fallback_action(eq, &legal, s);
-                dbg.chosen = format!("{} (equity {:.0}%)", action_label(&action), eq * 100.0);
+                let action = match self.fallback {
+                    Fallback::Equity => {
+                        let eq = fallback_equity(hole, &s.community, seed, s.actions.len());
+                        let action = fallback_action(eq, &legal, s);
+                        dbg.chosen = format!("{} (equity {:.0}%)", action_label(&action), eq * 100.0);
+                        action
+                    }
+                    Fallback::Range => {
+                        let (acts, eq, spot) = self.fallback_range_all(s, stacks, seed);
+                        let h = hand(hole);
+                        let action = acts[h].ok_or("the bot's cards are on the board")?;
+                        dbg.chosen = format!(
+                            "{} (equity {:.0}% against your estimated range; {} to call into {})",
+                            action_label(&action),
+                            eq[h] * 100.0,
+                            spot.to_call,
+                            spot.pot
+                        );
+                        action
+                    }
+                };
                 return Ok(TablePlay { dist: vec![(action, 1.0)], debug: dbg });
             }
         };
@@ -580,17 +869,29 @@ impl Engine {
             Err(_) => {
                 // The fallback, hand by hand.
                 let board = &s.community;
-                let exact = if board.len() >= 4 { Some(equity_all(board)) } else { None };
                 let mut pick = vec![usize::MAX; H];
-                for h in 0..H {
-                    if w[h] == 0.0 {
-                        continue;
+                match self.fallback {
+                    Fallback::Equity => {
+                        let exact = if board.len() >= 4 { Some(equity_all(board)) } else { None };
+                        for h in 0..H {
+                            if w[h] == 0.0 {
+                                continue;
+                            }
+                            let eq = match &exact {
+                                Some(e) => e[h],
+                                None => fallback_equity(hs[h], board, seed, s.actions.len()),
+                            };
+                            pick[h] = index_of(fallback_action(eq, &legal, s), &mut opts);
+                        }
                     }
-                    let eq = match &exact {
-                        Some(e) => e[h],
-                        None => fallback_equity(hs[h], board, seed, s.actions.len()),
-                    };
-                    pick[h] = index_of(fallback_action(eq, &legal, s), &mut opts);
+                    Fallback::Range => {
+                        let (acts, _, _) = self.fallback_range_all(s, stacks, seed);
+                        for h in 0..H {
+                            if let (true, Some(a)) = (w[h] != 0.0, acts[h]) {
+                                pick[h] = index_of(a, &mut opts);
+                            }
+                        }
+                    }
                 }
                 let mut p = vec![0f64; opts.len() * H];
                 for h in 0..H {
@@ -692,7 +993,7 @@ impl Engine {
         if strategies.is_empty() {
             return Err(std::io::Error::other("no strategies"));
         }
-        Ok(Engine { abs, strategies, live: LiveMode::Off, live_cfg: LiveCfg::default(), cache: Cache::new(256), bet_scale: 1.0 })
+        Ok(Engine { abs, strategies, live: LiveMode::Off, live_cfg: LiveCfg::default(), cache: Cache::new(256), bet_scale: 1.0, fallback: Fallback::Equity, fallback_value: 1.0 })
     }
 
     /// The table's node after the hand's first `upto` actions (the same
@@ -792,6 +1093,79 @@ mod tests {
     use super::*;
     use crate::bots::Bot;
     use hu_core::table::deal_random_hand;
+
+    /// Equity against a weighted range agrees with a brute-force walk over
+    /// every river card and opponent hand (card removal included).
+    #[test]
+    fn equity_against_a_range_matches_brute_force() {
+        use hu_core::cards::parse;
+        let board: Vec<Card> = ["Ah", "9d", "4c", "10s"].iter().map(|c| parse(c).unwrap()).collect();
+        let mut rng = SmallRng::seed_from_u64(5);
+        let hs = holes();
+        let opp: Vec<f32> = hs.iter().map(|&[a, b]| if board.contains(&a) || board.contains(&b) || rng.gen_bool(0.7) { 0.0 } else { rng.gen::<f32>() }).collect();
+        let eq = equity_vs(&board, &opp, 0, 1);
+        for me in [["Ad", "Kd"], ["9s", "9c"], ["Jh", "Qh"], ["5s", "2s"]] {
+            let me = [parse(me[0]).unwrap(), parse(me[1]).unwrap()];
+            let (mut num, mut den) = (0f64, 0f64);
+            for r in (0..52u8).filter(|c| !board.contains(c) && !me.contains(c)) {
+                let mut cards = vec![me[0], me[1]];
+                cards.extend(&board);
+                cards.push(r);
+                let mine = eval7(&cards);
+                for (o, &[a, b]) in hs.iter().enumerate() {
+                    if opp[o] == 0.0 || [a, b].iter().any(|c| *c == r || me.contains(c)) {
+                        continue;
+                    }
+                    cards[0] = a;
+                    cards[1] = b;
+                    let theirs = eval7(&cards);
+                    let share = if mine > theirs { 1.0 } else if mine == theirs { 0.5 } else { 0.0 };
+                    num += opp[o] as f64 * share;
+                    den += opp[o] as f64;
+                }
+            }
+            let h = hand(me);
+            assert!((eq[h] - num / den).abs() < 1e-4, "{:?}: {} vs brute force {}", me, eq[h], num / den);
+        }
+    }
+
+    /// The range rule's guarantees: it never folds more of the bot's range
+    /// than a bluff of the faced size needs to break even; it is monotone in
+    /// equity; shallow, it prices calls as getting all the chips in; it
+    /// value-bets only strong hands.
+    #[test]
+    fn range_rule_guards_and_prices() {
+        let mut rng = SmallRng::seed_from_u64(9);
+        let n = 400;
+        let valid = vec![true; n];
+        for _ in 0..200 {
+            let eq: Vec<f64> = (0..n).map(|_| rng.gen::<f64>()).collect();
+            let mine: Vec<f32> = (0..n).map(|_| if rng.gen_bool(0.5) { rng.gen::<f32>() } else { 0.0 }).collect();
+            let pot = rng.gen_range(10..200);
+            let added = rng.gen_range(2..300);
+            let spot = Spot { pot: pot + added, to_call: added, behind: rng.gen_range(0..400), faced: Some((added, pot)), can_raise: rng.gen_bool(0.5) };
+            let plays = range_rule(&eq, &mine, &valid, &spot);
+            let total: f64 = mine.iter().map(|&x| x as f64).sum();
+            let folded: f64 = (0..n).filter(|&h| plays[h] == Play::Fold).map(|h| mine[h] as f64).sum();
+            let max_fold = added as f64 / (pot + added) as f64;
+            assert!(folded <= max_fold * total + 1e-6, "folds {folded} of {total}, at most {max_fold}");
+            for a in 0..n {
+                for b in 0..n {
+                    if eq[a] > eq[b] && plays[b] != Play::Fold {
+                        assert_ne!(plays[a], Play::Fold, "monotone");
+                    }
+                }
+            }
+        }
+        // Shallow: calling 45 into 105 with 125 behind is a commitment, so
+        // the price is (45 + 125) / (150 + 250) = 42.5%; no guard here.
+        let spot = Spot { pot: 105, to_call: 45, behind: 125, faced: None, can_raise: true };
+        let plays = range_rule(&[0.40, 0.45, 0.60], &[1.0; 3], &[true; 3], &spot);
+        assert_eq!(plays, vec![Play::Fold, Play::Call, Play::AllIn]);
+        // Not facing a bet: value-bet 60%+, check the rest.
+        let spot = Spot { pot: 40, to_call: 0, behind: 150, faced: None, can_raise: true };
+        assert_eq!(range_rule(&[0.59, 0.61], &[1.0; 2], &[true; 2], &spot), vec![Play::Check, Play::BetPot]);
+    }
 
     /// The view the server gets at each decision must replay to the exact
     /// real state: random hands from random stack splits, random actions.

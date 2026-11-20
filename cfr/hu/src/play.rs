@@ -31,7 +31,12 @@
 //! value against the table, the opponent playing the table or best-responding),
 //! --safe-weight W|resolve (how strictly: weight of the hands that would beat
 //! their table value next to the estimated range; resolve = no estimate),
-//! --gpu on|off (turn solves' river work on the GPU when there is one;
+//! --fallback equity|range (what plays where the table can't follow the
+//! hand: equity against a random hand, the default, or against the
+//! opponent's estimated range, `engine::range_rule`), --fallback-value F
+//! (range fallback: the share of a raise past the raise cap read as a raise
+//! for value; default 1), --gpu on|off (turn solves' river work on the GPU
+//! when there is one;
 //! default on, same results), --gpu-slots N (at most N turn solves on the
 //! GPU at once; the rest on the CPU; default 4). `hu livebench --street turn --compare-gpu`
 //! solves each spot both ways.
@@ -128,6 +133,12 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
     if let Some(w) = flag(args, "--safe-weight") {
         e.live_cfg.safe_weight = if w == "resolve" { None } else { Some(w.parse().expect("--safe-weight W|resolve")) };
     }
+    if let Some(f) = flag(args, "--fallback-value") {
+        e.fallback_value = f.parse().expect("--fallback-value 0..1");
+    }
+    if let Some(f) = flag(args, "--fallback") {
+        e.fallback = hu_cfr::engine::Fallback::parse(&f).unwrap_or_else(|| panic!("--fallback equity|range, not {f}"));
+    }
     if let Some(f) = flag(args, "--gpu") {
         e.live_cfg.gpu = match f.as_str() {
             "on" => true,
@@ -146,7 +157,7 @@ pub fn live_flags(args: &[String], e: &mut Engine) {
 }
 
 /// "full", "sampled" or "NNbb".
-fn parse_stacks(s: Option<&str>) -> Stacks {
+pub fn parse_stacks(s: Option<&str>) -> Stacks {
     match s {
         None | Some("full") => Stacks::Full,
         Some("sampled") => Stacks::Sampled,
@@ -157,7 +168,7 @@ fn parse_stacks(s: Option<&str>) -> Stacks {
     }
 }
 
-fn stacks_name(s: Stacks) -> String {
+pub fn stacks_name(s: Stacks) -> String {
     match s {
         Stacks::Full => "100bb".into(),
         Stacks::Sampled => "sampled".into(),

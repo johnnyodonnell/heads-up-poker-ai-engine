@@ -22,8 +22,11 @@ hu_cfr/           the engine:
   tree.rs, menu.rs  the abstract betting tree, built from the rules port
   mccfr.rs          external-sampling MCCFR (Pluribus-style schedule)
   strategy.rs       exported strategies (1 byte per action)
-  engine.rs         play time: replay, translation, action mapping
+  engine.rs         play time: replay, translation, action mapping, the
+                    fallback where the tree can't follow the hand
   eval.rs, bots.rs  matches against scripted bots (duplicate, paired deals)
+  lbr.rs            local best response: an exploiter that knows the bot's
+                    strategy, for a lower bound on its exploitability
   score.rs          advantage scoring: live solving's edge over the table,
                     scored decision by decision
   live/             live solving: subgame tree, vectorized DCFR, showdowns,
@@ -31,7 +34,8 @@ hu_cfr/           the engine:
   cuda/river.cu     the GPU kernel for turn solves' river subtrees
   pushfold.rs, toy.rs, br.rs   solver validation games and exact best response
 hu/               the `hu` command line (abstraction, train, export, eval, compare,
-                  probe, livebench, rangecheck, scorecheck, serve, tree, pushfold)
+                  probe, livebench, rangecheck, scorecheck, turncheck, lbr, serve,
+                  tree, pushfold)
 scripts/          TS run with tsx: rule scenario checks, parity fixture dumper
 fixtures/         parity fixtures dumped from the TS engine (gitignored)
 box_env.sh        environment for the box (sourced by everything below)
@@ -546,6 +550,140 @@ bet; in Brown & Sandholm 2017, re-solving left a test game 150 mbb/hand
 exploitable where action translation left 1,465), and our opponents never
 look for weaknesses. Measuring that needs an exploiter, such as a local best
 response (as DeepStack was measured), not more hands against fixed bots.
+
+## Exploitability: local best response
+
+The matches above are all against opponents that never look for weaknesses:
+scripted bots and our own tables, which share the bot's betting menu. People
+do look for them, so the bot is also measured against an exploiter:
+**local best response** (LBR; Lisý & Bowling, "Equilibrium Approximation
+Quality of Current No-Limit Poker Bots", 2017), in `hu_cfr/src/lbr.rs`.
+
+```sh
+hu lbr --run v1c --live river --deals 2000 --stacks full --seed 5      # LBR on the flop, turn and river
+hu lbr --run v1c --streets 1234 ...                                     # ... and preflop
+hu lbr --run v1c --streets none ...                                     # checks and calls: the station bot
+```
+
+LBR knows the bot's strategy. At each of its decisions it holds the bot's
+exact range (each of the 1,326 hands weighted by how likely the bot was to
+play the hand this way, through the same path `Engine::decide` takes:
+translation, the fallback, live solves) and takes the action worth the most,
+assuming the hand is then checked and called down unless the bot folds at
+once:
+
+    U(call)  = wp·pot − (1 − wp)·asked
+    U(bet a) = fp·pot + (1 − fp)·(wp′·(pot + a) − (1 − wp′)·(asked + a))
+
+`wp` is its showdown share against the range (every board card still to
+come dealt), `fp` the bot's probability of folding to the bet, `wp′` the
+share against the hands that don't fold. It folds when nothing beats
+folding, and checks and calls on streets it isn't set to play. It considers
+the minimum bet or raise, ⅓, ½, ¾, 1, 1½, 2 and 3 times the pot, and all-in
+(on streets the bot solves live, where every answer costs the bot a solve:
+the minimum, ½, 1 and 2 pots, all-in).
+
+What it knows is the strategy, not the bot's luck: the bot translates
+off-menu sizes at random (seeded per hand), and LBR's model averages over 16
+independent draws of that translation (knowing the real draws, it could bet
+2× pot exactly when the bot will read it as all-in). On streets solved live
+it uses one draw, sampled by how well each explains the bot's play.
+
+Its result is scored two ways: in chips (all-in runouts at their
+expectation, as in `hu eval`) and against the bot's exact range at each
+showdown or all-in (LBR's expected share against every hand the bot could
+hold; same expectation, less luck). Checks: with `--streets none` LBR is
+exactly the station bot (the same deals, seats and draws as `hu eval`; every
+deal agrees with `hu eval --vs station` to 1e-14), and the two scores agree
+(−179 ± 38 in chips, −190 ± 26 range-scored, 3,000 deals).
+
+### What it finds
+
+LBR's win rate, bb/100 on its side (a lower bound on how exploitable the bot
+is), range-scored, 2,000 duplicate deals (4,000 hands) at 100bb, seed 5:
+
+| Bot | LBR on the flop, turn and river | LBR on every street |
+|---|---|---|
+| table only (`--live off`) | +191 ± 41 (chips +169 ± 47) | +208 ± 21 (10,000 deals, seed 6) |
+| live river (served since 2026-11-19) | +134 ± 37 (chips +106 ± 46) | |
+
+For scale: folding every hand loses 75 bb/100. Lisý & Bowling's LBR beat
+the abstraction-based competition bots it tested (Hyperborean 2013 and
+2014, Slumbot 2016, Act1 2016) by 3,300 to 5,060 mbb/hand (330 to 506
+bb/100).
+
+Where LBR makes its money against the table (how often it chose each
+action on that street; in parentheses, how often the bot then folded; LBR's
+model predicted these within a few points):
+
+| Street | LBR's main actions |
+|---|---|
+| Flop | min-raise of the bot's bet 23% of its decisions (bot folds 56%), bet 3× pot 17% (74%), min-bet 17% (28%), bet 2× pot 10% (66%), all-in 5% (84%) |
+| Turn | min-bet 36% (21%), min-raise 13% (58%), bets of 2–3× pot 12% (61–69%), all-in 5% (82%) |
+| River | min-bet 32% (26%), all-in 10% (75%), min-raise 8% (66%) |
+| Preflop (with `--streets 1234`) | raise 3× the pot 51% (bot folds 69%), 2× 20% (61%), 1½× 13% (55%) |
+
+The holes are where its sizes leave the bot's menu: a min-raise is read as a
+pot-size raise (the menu's only raise), a min-bet as a third of the pot, and
+anything above the pot partly as all-in. Live river solving answers real
+sizes with exact hands, and LBR finds little to bet into there (on the river
+it mostly checks or folds, and its min-bets get no folds), but the flop and
+turn are played from the same table.
+
+### The fallback
+
+Where the abstract tree can't follow the real hand, the table has no
+strategy and a heuristic plays (the debug output says why):
+
+- a raise past the menu's three per street (a 5-bet preflop, a fourth raise
+  after the flop), which the translation can only map to a call;
+- the rest of a hand whose abstract version is over: a large bet translated
+  as all-in and called, or a strategy trained shallower than the real stacks.
+
+The default heuristic (`--fallback equity`) calls when its equity against a
+*random* hand is at least 5% above the pot odds. Against a 5-bet, where the
+price is low and almost any hand beats a random one, it continues with
+90–100% of the bot's 4-bet range, bluffs included.
+
+`--fallback range` (`engine::range_rule`) plays on equity against the
+opponent's *estimated range* instead: the table's estimate along the
+translated history up to where the hand left the tree, with the hedges live
+solving uses and some "any hand" mixed in. Facing a bet, it continues with
+the hands whose equity covers the price (in a shallow spot, the price of
+getting all the chips in; deeper, the pot odds plus 5%) and jams the
+strongest; a guard keeps it from folding more of its range than a pure bluff
+of the size needs to break even. A raise past the raise cap, which the table
+has no model of, is read as a raise for value (the opponent's hands ahead of
+the bot's range; `--fallback-value` sets the share read that way). Against
+5-bets after the bot opens to 2bb, is 3-bet to 6bb and 4-bets to 15bb (the
+share of the bot's 4-bet range; `hu` audit of the served table):
+
+| The 5-bet | Bluff breaks even at | `equity`: fold / call / jam | `range`: fold / call / jam |
+|---|---|---|---|
+| to 30bb (2×) | 53% folds | 0 / 92 / 8% | 6 / 89 / 5% |
+| to 37.5bb (2½×) | 60% | 0 / 92 / 8% | 60 / 26 / 14% |
+| to 45bb (3×) | 65% | 1 / 92 / 8% | 65 / 21 / 14% |
+| all-in | 82% | 10 / 90 / 0% | 68 / 32 / 0% |
+
+That folds the 4-bet bluffs, but it isn't the default, because it doesn't
+pay. Against opponents that raise with anything, reading their raises as
+value costs a lot, and the exploiter, which 5-bets only when it pays, doesn't
+mind either way. The range fallback minus the default, on the same deals
+(20,000 deals per bot, 10,000 for LBR; bb/100, the bot's side):
+
+| Opponent | Value share 1 | Value share ½ | Value share 0 | Value share 1, preflop only |
+|---|---|---|---|---|
+| maniac (pot-size raises with any hand) | −98.8 ± 12.0 | −31.4 ± 9.2 | +2.9 ± 7.7 | −95.5 ± 11.8 |
+| minbet | −16.6 ± 6.8 | −11.0 ± 6.2 | −8.6 ± 6.2 | −8.6 ± 6.1 |
+| overbet | −16.5 ± 5.0 | −0.4 ± 3.9 | −0.4 ± 3.9 | −16.5 ± 5.0 |
+| v1a, v1c, station, shover | 0 (no fallbacks) | | | |
+| LBR on every street (range-scored) | −6.1 ± 13.1 | | | |
+
+The cost is exactly in folding to 5-bets (preflop only costs as much), and
+without the value reading the range rule plays like the default. The
+structural fix is in the menu instead: with all-in offered past the raise
+cap, a 5-bet jam is in the tree, and the bot both learns to 4-bet less
+lightly and answers 5-bets from its training (the `cap` menu, `hu tree --menu cap`).
 
 ## Saved runs
 

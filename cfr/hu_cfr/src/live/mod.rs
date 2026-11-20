@@ -540,6 +540,31 @@ pub fn decide(e: &Engine, v: &View, s: &State, mode: LiveMode, rng: &mut SmallRn
     Ok(Decision { action, debug: dbg, dist })
 }
 
+/// The bot's live play at `s` (the replayed state of `v`) for every hand at
+/// once: the real options and each hand's probability of each (option-major,
+/// `p[o * H + h]`, `holes()` order). It is the solve `decide` samples from
+/// (same cache key), so it costs nothing extra for a decision the bot makes
+/// anyway. A solve doesn't depend on the bot's own cards, only on what's
+/// public and the hand's seed.
+pub fn play_all(e: &Engine, v: &View, s: &State, mode: LiveMode) -> Result<(Vec<hu_core::rules::Action>, Vec<f64>), String> {
+    let street = s.street;
+    let k = street_start(&s.actions, street);
+    let n = s.actions.len() - k;
+    let mut st = Stats::default();
+    let solved = solve(e, v, s, mode, (v.seed, v.bot), street, n, &mut st)?;
+    let g = &solved.g;
+    if g.path.len() != n + 1 {
+        return Err("live solve: no decision at the current node".into());
+    }
+    let node = g.current();
+    let nd = &g.nodes[node as usize];
+    if nd.kind != Kind::Decision(v.bot as u8) {
+        return Err("live solve: the current node is not the bot's".into());
+    }
+    let sg = solved.strat.get(&node).ok_or("live solve: no strategy at the current node")?;
+    Ok((g.actions(nd).to_vec(), sg.iter().map(|&x| x as f64).collect()))
+}
+
 /// One solve of the bot's current decision with `iters` iterations, outside
 /// the cache (for benchmarks): (ms, exploitability in % of the pot,
 /// decision nodes, solver floats).

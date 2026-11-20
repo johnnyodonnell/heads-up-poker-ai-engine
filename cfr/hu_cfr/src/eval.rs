@@ -149,6 +149,31 @@ fn play_hand(players: [&Player; 2], stacks: [i32; 2], button: usize, deck: Vec<u
     }
 }
 
+/// Deal `d` of a match with this seed: the stacks, the button, the deck,
+/// and the seed of the plays' draws (shared by both plays of the deal,
+/// independent of the deal's own draws).
+pub struct DealSpec {
+    pub stacks: [i32; 2],
+    pub button: usize,
+    pub deck: Vec<u8>,
+    pub pseed: u64,
+}
+
+pub fn deal_spec(seed: u64, d: usize, stacks: Stacks) -> DealSpec {
+    let dseed = seed ^ (d as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut rng = SmallRng::seed_from_u64(dseed);
+    let st = match stacks {
+        Stacks::Full => [STARTING_STACK; 2],
+        Stacks::Sampled => sample_stacks(&mut rng),
+        Stacks::Fixed(c) => [c; 2],
+    };
+    let button = rng.gen_range(0..2usize);
+    let mut deck: Vec<u8> = (0..52).collect();
+    deck.shuffle(&mut rng);
+    let pseed = SmallRng::seed_from_u64(dseed ^ 0x5DEE_CE66_D1CE_4E5B).gen::<u64>();
+    DealSpec { stacks: st, button, deck, pseed }
+}
+
 /// Player A vs player B over `deals` duplicate deals starting at deal index
 /// `from` (deals depend only on the seed and their index, so a match can be
 /// extended later); with `score`, A's live decisions are scored against its
@@ -160,19 +185,7 @@ pub fn play_match(a: &Player, b: &Player, from: usize, deals: usize, stacks: Sta
     let rows: Vec<(f64, Adv, [f64; 6])> = (from..from + deals)
         .into_par_iter()
         .map(|d| {
-            let dseed = seed ^ (d as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-            let mut rng = SmallRng::seed_from_u64(dseed);
-            let st = match stacks {
-                Stacks::Full => [STARTING_STACK; 2],
-                Stacks::Sampled => sample_stacks(&mut rng),
-                Stacks::Fixed(c) => [c; 2],
-            };
-            let button = rng.gen_range(0..2usize);
-            let mut deck: Vec<u8> = (0..52).collect();
-            deck.shuffle(&mut rng);
-            // The plays' draws: shared by both plays, independent of the
-            // deal's own draws.
-            let pseed = SmallRng::seed_from_u64(dseed ^ 0x5DEE_CE66_D1CE_4E5B).gen::<u64>();
+            let DealSpec { stacks: st, button, deck, pseed } = deal_spec(seed, d, stacks);
             let mut total = 0.0;
             let mut adv = Adv::default();
             let mut plays = [0f64; 6];
