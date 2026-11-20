@@ -37,8 +37,12 @@ The current strategy (v1c) beats all seven scripted test bots by 39 to 370
 bb/100 and edges out the earlier checkpoints head to head. Against
 [Slumbot](https://slumbot.com), a strong public research bot, it is about
 break-even: **+8.6 ± 37.1 bb/100 over 10,000 hands**, played at Slumbot's
-200bb stacks, deeper than v1c was trained for. Details and every number are
-in [Results](cfr/README.md#results).
+200bb stacks, deeper than v1c was trained for. Against an exploiter that
+knows its strategy and probes for weak spots (local best response), the
+served bot (v1c with the turn and river solved live) loses 39 ± 36 bb/100,
+against 191 ± 41 for the table alone; most of what's left is on the flop.
+Details and every number are in [Results](cfr/README.md#results) and
+[Exploitability](cfr/README.md#exploitability-local-best-response).
 
 ## The trained strategy
 

@@ -154,15 +154,19 @@ not affect the app, whose matches start at 100bb. The hand logs are kept in
 
 ## Live solving (v2)
 
-With `--live river` or `--live turn` (on `hu eval`, `serve`, `livebench`), the
-engine solves turn and river decisions live instead of looking them up;
-preflop and the flop stay on the table. Off by default in the CLI. The app
-has been served with live river since 2026-11-19 (it passed test round 2):
+With `--live river` or `--live turn` (on `hu eval`, `lbr`, `serve`,
+`livebench`), the engine solves turn and river decisions live instead of
+looking them up; preflop and the flop stay on the table. Off by default in
+the CLI. The app is served with live turn since 2026-11-19 (the turn and the
+river solved live, about 1.4 s per turn decision on the box): it matched
+live river against our fixed opponents (test round 2, below) but is far
+harder to exploit (local best response wins 94 ± 35 bb/100 less against it;
+"Exploitability", below). It was served with live river earlier that day.
 `$HU_HOME/live_mode` holds the mode (`serve.sh` reads it), and
 `GET /api/health` shows it:
 
 ```sh
-cfr/box.sh 'echo river > $HU_HOME/live_mode && pm2 restart hu-engine'
+cfr/box.sh 'echo turn > $HU_HOME/live_mode && pm2 restart hu-engine'
 ```
 
 How a live decision is made (`hu_cfr/src/live/`):
@@ -605,7 +609,16 @@ is), range-scored, 2,000 duplicate deals (4,000 hands) at 100bb, seed 5:
 | Bot | LBR on the flop, turn and river | LBR on every street |
 |---|---|---|
 | table only (`--live off`) | +191 ± 41 (chips +169 ± 47) | +208 ± 21 (10,000 deals, seed 6) |
-| live river (served since 2026-11-19) | +134 ± 37 (chips +106 ± 46) | |
+| live river | +134 ± 37 (chips +106 ± 46) | |
+| live turn (served since 2026-11-19) | **+39 ± 36** (chips +51 ± 45) | |
+
+On the same deals, paired: live river − table −58 ± 29, live turn − live
+river −94 ± 35 (range-scored; LBR's side, so negative is better for the
+bot). Live turn is what the fixed-opponent tests couldn't see: against them
+it played no better than live river ("Why live turn adds nothing here"), but
+an opponent that probes the turn finds almost nothing there. The run took
+2.6 h (14,075 turn solves: every bet LBR considers on the turn costs the bot
+a solve).
 
 For scale: folding every hand loses 75 bb/100. Lisý & Bowling's LBR beat
 the abstraction-based competition bots it tested (Hyperborean 2013 and
@@ -625,10 +638,11 @@ model predicted these within a few points):
 
 The holes are where its sizes leave the bot's menu: a min-raise is read as a
 pot-size raise (the menu's only raise), a min-bet as a third of the pot, and
-anything above the pot partly as all-in. Live river solving answers real
-sizes with exact hands, and LBR finds little to bet into there (on the river
-it mostly checks or folds, and its min-bets get no folds), but the flop and
-turn are played from the same table.
+anything above the pot partly as all-in. Live solving answers real sizes
+with exact hands, and LBR finds little to bet into there: against live turn
+it checks or folds on 63% of its turn decisions and its turn min-bets get 7%
+folds (against the table: 21%). What's left is mostly the flop, still played
+from the table.
 
 ### The fallback
 
