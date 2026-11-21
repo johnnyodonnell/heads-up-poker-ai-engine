@@ -175,6 +175,7 @@ export function logHand(state: EngineState): void {
     actions: state.actions,
     results: state.results && {
       reveal: state.results.reveal,
+      mucked: state.results.mucked,
       winners: state.results.winners,
       pots: state.results.pots.map((p) => ({ amount: p.amount, winners: p.winners })),
     },

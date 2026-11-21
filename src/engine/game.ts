@@ -124,6 +124,8 @@ export interface Results {
   // At showdown the still-in players' cards are turned face up; a hand won by
   // everyone else folding stays concealed.
   reveal: boolean;
+  // Seats that mucked at showdown instead of showing (see showdownMucks).
+  mucked: number[];
 }
 
 export interface EngineState {
@@ -642,6 +644,39 @@ export function buildPots(players: EnginePlayer[]): PotLayer[] {
   return pots.map(({ amount, eligible }) => ({ amount, eligible }));
 }
 
+// Who mucks at showdown. If anyone is all-in, every hand is tabled. Otherwise
+// the river's last bettor or raiser shows first (or, if the river was checked
+// through, the first player to act), and each player after them shows only a
+// hand that wins or ties what has been shown so far; a beaten hand is mucked.
+function showdownMucks(
+  state: EngineState,
+  players: EnginePlayer[],
+  scores: Map<number, Score>,
+): number[] {
+  if (players.some((p) => scores.has(p.id) && p.status === "allin")) return [];
+  let first = nextSeat(players, state.button, (p) => scores.has(p.id));
+  for (let i = state.actions.length - 1; i >= 0; i--) {
+    const a = state.actions[i];
+    if (a.street === "river" && (a.type === "bet" || a.type === "raise")) {
+      first = a.seat;
+      break;
+    }
+  }
+  const mucked: number[] = [];
+  let best: Score | null = null;
+  for (let step = 0; step < SEATS; step++) {
+    const id = (first + step) % SEATS;
+    const s = scores.get(id);
+    if (!s) continue;
+    if (best && compareScores(s, best) < 0) {
+      mucked.push(id);
+    } else {
+      best = s;
+    }
+  }
+  return mucked;
+}
+
 // Decide the hand, distribute chips, and set results/phase.
 function settle(state: EngineState, reveal: boolean): EngineState {
   const players = state.players.map((p) => ({ ...p }));
@@ -712,7 +747,12 @@ function settle(state: EngineState, reveal: boolean): EngineState {
     pot: 0,
     toAct: -1,
     phase: matchOver ? "match-over" : "hand-over",
-    results: { pots: potResults, winners, reveal },
+    results: {
+      pots: potResults,
+      winners,
+      reveal,
+      mucked: reveal ? showdownMucks(state, players, scores) : [],
+    },
     log,
   };
 }
