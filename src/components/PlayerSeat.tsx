@@ -64,6 +64,8 @@ export default function PlayerSeat({
   const hasCards = player.holeCards.length > 0 && !folded && !out;
   // ...but you can still peek at your own folded cards by hovering the seat.
   const canPeek = player.holeCards.length > 0 && folded && showCards;
+  // In debug view the bot's folded cards stay up (dimmed), no hover needed.
+  const foldedClass = faceUp && !player.isHuman ? "folded-shown" : "folded-peek";
 
   const classNames = [
     "seat",
@@ -81,7 +83,7 @@ export default function PlayerSeat({
   return (
     <div className={classNames} style={at(SEAT_POS[position])}>
       {(hasCards || canPeek) && (
-        <div className={canPeek ? "seat-cards folded-peek" : "seat-cards"}>
+        <div className={canPeek ? `seat-cards ${foldedClass}` : "seat-cards"}>
           {player.holeCards.map((card, i) => (
             <Card
               key={i}

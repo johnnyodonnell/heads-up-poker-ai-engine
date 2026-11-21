@@ -77,6 +77,11 @@
   opacity: 1;
 }
 
+/* Debug view: the bot's folded cards are always shown, dimmed the same way. */
+.seat-cards.folded-shown {
+  filter: grayscale(0.35) brightness(0.6);
+}
+
 .seat.folded .seat-plate {
   opacity: 0.55;
 }
