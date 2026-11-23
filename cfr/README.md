@@ -101,8 +101,8 @@ All in bb/100 from the engine's side, ± a 95% interval.
 |---|---|---|---|---|
 | v1a (checkpoint A) | a200: 200/200/200 | 300M, 100bb only | 12 min | 2026-11-16 |
 | v1b (checkpoint B) | a2k: 2000/2000/1000 | 2B | 3.6 h | 2026-11-16 |
-| v1c (checkpoint C) | a10k: 10000/5000/2000 | 5B | 9.3 h | since 2026-11-17 |
-| v1d (menu `wide-river`) | a10k | 23.1B (scaled to the tree: `MENU=wide-river SCALE=tree train_all.sh v1d a10k 5e9`) | training since 2026-11-19 20:26, estimated ~66 h | |
+| v1c (checkpoint C) | a10k: 10000/5000/2000 | 5B | 9.3 h | 2026-11-17 to 2026-11-22 |
+| v1d (menu `wide-river`) | a10k | 23.1B (scaled to the tree: `MENU=wide-river SCALE=tree train_all.sh v1d a10k 5e9`) | 67.6 h (100bb: 36.4 h) | since 2026-11-22 |
 
 ### Against the scripted bots
 
@@ -120,6 +120,29 @@ reaches them. Intervals are ±5 to ±24.
 | minbet (min-bets and min-raises) | +315 | +369 | +370 |
 | overbet (bets or raises 3× pot) | −8 | +45 | +39 |
 
+v1d against v1c on the same deals (both run 2026-11-22; v1c's numbers
+differ from the column above by up to 16, the engine code having changed
+since), with the paired difference:
+
+| Bot | v1c | v1d | v1d − v1c |
+|---|---|---|---|
+| random | +148 | +141 | −6 ± 14 |
+| station | +202 | +212 | +10 ± 10 |
+| maniac | +199 | +159 | **−41 ± 20** |
+| nit | +41 | +44 | +3 ± 5 |
+| shover | +94 | +108 | **+15 ± 6** |
+| minbet | +371 | +300 | **−72 ± 20** |
+| overbet | +44 | +78 | **+34 ± 17** |
+
+v1d reaches the fallback a quarter to a third as often against the bots
+that raise (maniac 3,997 decisions → 1,260, minbet 9,721 → 2,200, overbet
+4,750 → 1,791): its tree goes on past a third raise, with all-in, where
+v1c's ends. The fallback values hands against a random hand, which is
+exactly right against a bot that ignores its cards (the fallback alone
+moved v1c's maniac result by up to 100 bb/100), so v1d wins less from
+maniac and minbet; it is also what an opponent who reads it can exploit
+("The fallback", below).
+
 ### Head to head
 
 `hu eval --run v1c --vs run:v1b,run:v1a --deals 200000`: 400,000 hands.
@@ -128,6 +151,17 @@ reaches them. Intervals are ±5 to ±24.
 |---|---|---|
 | v1c vs v1b | +1.0 ± 2.6 | +3.9 ± 3.0 |
 | v1c vs v1a | +10.9 ± 2.6 | +7.8 ± 3.1 |
+
+v1d against v1c at each stack depth it was trained for (`hu eval --run v1d
+--vs run:v1c --stacks NNbb --seed 2`; 40,000 hands, 100,000 at 100bb):
+
+| Depth | 100bb | 70bb | 50bb | 35bb | 25bb | 12bb | 6bb |
+|---|---|---|---|---|---|---|---|
+| v1d vs v1c | +3.7 ± 5.4 | +9.8 ± 7.1 | +5.5 ± 6.1 | +2.8 ± 4.5 | +1.7 ± 3.4 | +0.7 ± 1.9 | +0.2 ± 0.5 |
+
+Ahead at every depth, by more than the noise only at 70bb. Two strategies
+near equilibrium win little from each other; the difference shows more
+against an exploiter ("Exploitability").
 
 ### Against Slumbot
 
@@ -158,11 +192,12 @@ not affect the app, whose matches start at 100bb. The hand logs are kept in
 With `--live river` or `--live turn` (on `hu eval`, `lbr`, `serve`,
 `livebench`), the engine solves turn and river decisions live instead of
 looking them up; preflop and the flop stay on the table. Off by default in
-the CLI. The app is served with live turn since 2026-11-19 (the turn and the
-river solved live, about 1.4 s per turn decision on the box): it matched
-live river against our fixed opponents (test round 2, below) but is far
-harder to exploit (local best response wins 94 ± 35 bb/100 less against it;
-"Exploitability", below). It was served with live river earlier that day.
+the CLI. The app is served with live turn since 2026-11-19 (v1c, then v1d
+from 2026-11-22; the turn and the river solved live, about 1.4 s per turn
+decision on the box): it matched live river against our fixed opponents
+(test round 2, below) but is far harder to exploit (local best response
+wins 94 ± 35 bb/100 less against it; "Exploitability", below). It was
+served with live river earlier that day.
 `$HU_HOME/live_mode` holds the mode (`serve.sh` reads it), and
 `GET /api/health` shows it:
 
@@ -612,14 +647,18 @@ is), range-scored, 2,000 duplicate deals (4,000 hands) at 100bb, seed 5:
 | table only (`--live off`) | +191 ± 41 (chips +169 ± 47) | +208 ± 21 (10,000 deals, seed 6) |
 | live river | +134 ± 37 (chips +106 ± 46) | |
 | live turn (served since 2026-11-19) | **+39 ± 36** (chips +51 ± 45) | |
+| v1d, table only | +146 ± 39 (chips +150 ± 47) | +146 ± 18 (10,000 deals, seed 6; v1c +208 ± 21 on the same deals) |
+| v1d, live turn (served since 2026-11-22) | being measured | |
 
 On the same deals, paired: live river − table −58 ± 29, live turn − live
 river −94 ± 35 (range-scored; LBR's side, so negative is better for the
-bot). Live turn is what the fixed-opponent tests couldn't see: against them
-it played no better than live river ("Why live turn adds nothing here"), but
-an opponent that probes the turn finds almost nothing there. The run took
-2.6 h (14,075 turn solves: every bet LBR considers on the turn costs the bot
-a solve).
+bot); v1d − v1c, table only: −46 ± 49 on the flop, turn and river, and
+−62 ± 22 on every street (10,000 deals). Live turn is what the
+fixed-opponent tests couldn't see: against them it played no better than
+live river ("Why live turn adds nothing here"), but an opponent that
+probes the turn finds almost nothing there. v1c's live turn run took 2.6 h
+(14,075 turn solves: every bet LBR considers on the turn costs the bot a
+solve).
 
 For scale: folding every hand loses 75 bb/100. Lisý & Bowling's LBR beat
 the abstraction-based competition bots it tested (Hyperborean 2013 and
@@ -644,6 +683,13 @@ with exact hands, and LBR finds little to bet into there: against live turn
 it checks or folds on 63% of its turn decisions and its turn min-bets get 7%
 folds (against the table: 21%). What's left is mostly the flop, still played
 from the table.
+
+Against v1d's table (the `wide-river` menu: half-pot raises, 1.5× and 2.5×
+pot bets, a 5-bet) the flop min-raise hole narrows (the bot folds 41% to
+it, against 56%), and LBR's favourite flop action becomes the min-bet
+(21% of its decisions; the bot folds 29% to a bet of one big blind, which
+it reads as a third of the pot, still the smallest bet on the menu).
+Preflop it raises 3× the pot 58% of the time (the bot folds 74%).
 
 ### The fallback
 
@@ -754,6 +800,17 @@ so the first column is the realistic one; the second is the cautious bound.
 Memory (one depth at a time) and disk (about 4× v1c's 16 GB of checkpoints
 for `wide`) fit on the box.
 
+### v1d: how it went
+
+v1d is `wide-river` with iterations scaled to the tree: 67.6 h for every
+depth against the 66.0 h estimated (100bb 36.4 h, 70bb 17.3 h, 50bb 8.1 h,
+35bb 3.7 h, 25bb 1.9 h, 12bb 18 min, 6bb 3 min), on all 20 cores. At
+100bb the rate fell from 196k to about 100k iterations/s over the first
+20% (while regrets are discounted), then climbed once negative-regret
+pruning started, from 144k to 271k/s at the end. Against v1c it is ahead
+head to head at every depth (clearly only at 70bb), and its table is 30%
+less exploitable ("Head to head", "Exploitability").
+
 ## Saved runs
 
 Trained runs are too big for git (v1c is 7.2 GB of card abstraction, 1 GB
@@ -763,20 +820,21 @@ its files.
 
 | Release | Run | Abstraction | Commit | Notes |
 |---|---|---|---|---|
-| [`strategy-v1c`](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1c) | v1c (checkpoint C) | a10k: 169/10000/5000/2000 | 01ed9ef | served since 2026-11-17 |
+| [`strategy-v1c`](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1c) | v1c (checkpoint C) | a10k: 169/10000/5000/2000 | 01ed9ef | served 2026-11-17 to 2026-11-22 |
+| [`strategy-v1d`](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1d) | v1d (`wide-river` menu) | a10k: 169/10000/5000/2000 | 7737363 | served since 2026-11-22; no checkpoints |
 
 ### What a release holds
 
-| Asset | Restores to | Size (v1c) | Needed for |
-|---|---|---|---|
-| `abstraction-ABS.tar.zst` | `data/ABS/` | 0.78 GB | serving: maps cards to hand groups |
-| `strategy-RUN.tar.zst` | `strategies/RUN/` | 0.59 GB | serving: the lookup table, every stack depth |
-| `checkpoint-RUN-sN.zst.partNN` | `runs/RUN/sN/solver.ckpt` | ~13 GB in all | only to resume training a depth |
-| `SHA256SUMS` | | | checksums of every original file |
-| `release.env` | | | the run and abstraction names, for the restore script |
+| Asset | Restores to | Size (v1c) | Size (v1d) | Needed for |
+|---|---|---|---|---|
+| `abstraction-ABS.tar.zst` | `data/ABS/` | 0.78 GB | 0.78 GB | serving: maps cards to hand groups |
+| `strategy-RUN.tar.zst` | `strategies/RUN/` | 0.59 GB | 2.0 GB | serving: the lookup table, every stack depth |
+| `checkpoint-RUN-sN.zst.partNN` | `runs/RUN/sN/solver.ckpt` | ~13 GB in all | not saved | only to resume training a depth |
+| `SHA256SUMS` | | | | checksums of every original file |
+| `release.env` | | | | the run and abstraction names, for the restore script |
 
 An archive over GitHub's 2 GiB asset limit goes up as `NAME.tar.zst.partNN`
-pieces (v1d's strategy, for one), which the restore script joins.
+pieces, which the restore script joins.
 
 The abstraction must be saved with the strategy: the strategy is indexed by
 its hand groups, and rebuilding it (multithreaded k-means) isn't guaranteed to

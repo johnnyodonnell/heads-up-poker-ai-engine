@@ -33,28 +33,32 @@ the options it was choosing between with their probabilities, and its pick.
 
 ## How strong is it?
 
-The current strategy (v1c) beats all seven scripted test bots by 39 to 370
-bb/100 and edges out the earlier checkpoints head to head. Against
-[Slumbot](https://slumbot.com), a strong public research bot, it is about
-break-even: **+8.6 ± 37.1 bb/100 over 10,000 hands**, played at Slumbot's
-200bb stacks, deeper than v1c was trained for. Against an exploiter that
-knows its strategy and probes for weak spots (local best response), the
-served bot (v1c with the turn and river solved live) loses 39 ± 36 bb/100,
-against 191 ± 41 for the table alone; most of what's left is on the flop.
+The current strategy (v1d, served since 2026-11-22: a wider betting menu,
+trained for 68 hours) beats all seven scripted test bots by 44 to 300
+bb/100 and is ahead of v1c, the one before it, at every stack depth head
+to head. Against an exploiter that knows its strategy and probes for weak
+spots (local best response), v1d's table loses 146 ± 18 bb/100, against
+208 ± 21 for v1c's; with the turn and river solved live, as served, v1c
+lost 39 ± 36 (v1d is being measured). Against
+[Slumbot](https://slumbot.com), a strong public research bot, v1c was
+about break-even: **+8.6 ± 37.1 bb/100 over 10,000 hands**, played at
+Slumbot's 200bb stacks, deeper than it was trained for.
 Details and every number are in [Results](cfr/README.md#results) and
 [Exploitability](cfr/README.md#exploitability-local-best-response).
 
 ## The trained strategy
 
-The strategy the bot plays is too big for git (about 8 GB on disk), so it is
-saved in a GitHub Release instead:
-[**`strategy-v1c`**](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1c)
-(checkpoint C, served since 2026-11-17). To put it back on the box, for
-example after a disk loss, without retraining (~10 h):
+The strategy the bot plays is too big for git (about 11.5 GB on disk with
+its card abstraction), so it is saved in a GitHub Release instead:
+[**`strategy-v1d`**](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1d)
+(served since 2026-11-22; the previous strategy,
+[`strategy-v1c`](https://github.com/johnnyodonnell/heads-up-poker-ai-engine/releases/tag/strategy-v1c),
+is kept too). To put it back on the box, for example after a disk loss,
+without retraining (~68 h):
 
 ```sh
-cfr/box.sh ./release_restore.sh strategy-v1c
-cfr/box.sh 'echo v1c > $HU_HOME/current_run && pm2 restart hu-engine'
+cfr/box.sh ./release_restore.sh strategy-v1d
+cfr/box.sh 'echo v1d > $HU_HOME/current_run && pm2 restart hu-engine'
 ```
 
 The restore takes a couple of minutes and checks every file against the
