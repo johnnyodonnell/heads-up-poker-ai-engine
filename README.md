@@ -38,8 +38,9 @@ trained for 68 hours) beats all seven scripted test bots by 44 to 300
 bb/100 and is ahead of v1c, the one before it, at every stack depth head
 to head. Against an exploiter that knows its strategy and probes for weak
 spots (local best response), v1d's table loses 146 ± 18 bb/100, against
-208 ± 21 for v1c's; with the turn and river solved live, as served, v1c
-lost 39 ± 36 (v1d is being measured). Against
+208 ± 21 for v1c's; with the turn and river solved live, as served, v1d
+loses 17 ± 37 and v1c 39 ± 36 (on the same deals; the gap is within the
+noise). Against
 [Slumbot](https://slumbot.com), a strong public research bot, v1c was
 about break-even: **+8.6 ± 37.1 bb/100 over 10,000 hands**, played at
 Slumbot's 200bb stacks, deeper than it was trained for.

@@ -644,28 +644,38 @@ is), range-scored, 2,000 duplicate deals (4,000 hands) at 100bb, seed 5:
 
 | Bot | LBR on the flop, turn and river | LBR on every street |
 |---|---|---|
-| table only (`--live off`) | +191 ± 41 (chips +169 ± 47) | +208 ± 21 (10,000 deals, seed 6) |
-| live river | +134 ± 37 (chips +106 ± 46) | |
-| live turn (served since 2026-11-19) | **+39 ± 36** (chips +51 ± 45) | |
-| v1d, table only | +146 ± 39 (chips +150 ± 47) | +146 ± 18 (10,000 deals, seed 6; v1c +208 ± 21 on the same deals) |
-| v1d, live turn (served since 2026-11-22) | being measured | |
+| v1c, table only (`--live off`) | +191 ± 41 (chips +169 ± 47) | +208 ± 21 (10,000 deals, seed 6) |
+| v1c, live river | +134 ± 37 (chips +106 ± 46) | |
+| v1c, live turn (served 2026-11-19 to 2026-11-22) | +39 ± 36 (chips +51 ± 45) | |
+| v1d, table only | +146 ± 39 (chips +150 ± 47) | +146 ± 18 (10,000 deals, seed 6) |
+| v1d, live turn (served since 2026-11-22) | **+17 ± 37** (chips +48 ± 48) | |
 
-On the same deals, paired: live river − table −58 ± 29, live turn − live
-river −94 ± 35 (range-scored; LBR's side, so negative is better for the
-bot); v1d − v1c, table only: −46 ± 49 on the flop, turn and river, and
-−62 ± 22 on every street (10,000 deals). Live turn is what the
-fixed-opponent tests couldn't see: against them it played no better than
-live river ("Why live turn adds nothing here"), but an opponent that
-probes the turn finds almost nothing there. v1c's live turn run took 2.6 h
-(14,075 turn solves: every bet LBR considers on the turn costs the bot a
-solve).
+The same deals, paired (LBR's side, so negative is better for the bot):
+
+| Difference | Range-scored | Chips |
+|---|---|---|
+| v1c: live river − table | −58 ± 29 | −63 ± 31 |
+| v1c: live turn − live river | −94 ± 35 | −55 ± 45 |
+| v1c: live turn − table | −152 ± 42 | −118 ± 49 |
+| v1d: live turn − table | −129 ± 39 | −102 ± 47 |
+| v1d − v1c, table only | −46 ± 49 | −19 ± 59 |
+| v1d − v1c, table only, LBR on every street (10,000 deals, seed 6) | −62 ± 22 | −49 ± 25 |
+| v1d − v1c, live turn | −22 ± 40 | −3 ± 52 |
+
+Live turn is what the fixed-opponent tests couldn't see: against them it
+played no better than live river ("Why live turn adds nothing here"), but
+an opponent that probes the turn finds almost nothing there. v1d's table
+is less exploitable than v1c's (clearly so over 10,000 deals); with the
+turn solved live, as served, v1d is ahead by less than the noise. The live
+turn runs took 2.6 h for v1c and 2.8 h for v1d (14,075 and 15,604 turn
+solves: every bet LBR considers on the turn costs the bot a solve).
 
 For scale: folding every hand loses 75 bb/100. Lisý & Bowling's LBR beat
 the abstraction-based competition bots it tested (Hyperborean 2013 and
 2014, Slumbot 2016, Act1 2016) by 3,300 to 5,060 mbb/hand (330 to 506
 bb/100).
 
-Where LBR makes its money against the table (how often it chose each
+Where LBR makes its money against v1c's table (how often it chose each
 action on that street; in parentheses, how often the bot then folded; LBR's
 model predicted these within a few points):
 
@@ -689,7 +699,11 @@ pot bets, a 5-bet) the flop min-raise hole narrows (the bot folds 41% to
 it, against 56%), and LBR's favourite flop action becomes the min-bet
 (21% of its decisions; the bot folds 29% to a bet of one big blind, which
 it reads as a third of the pot, still the smallest bet on the menu).
-Preflop it raises 3× the pot 58% of the time (the bot folds 74%).
+Preflop it raises 3× the pot 58% of the time (the bot folds 74%). Against
+v1d with live turn, LBR plays the flop the same way (the bot's flop is
+still its table), and the turn gives it about as little as v1c's did: it
+checks or folds on 59% of its turn decisions (63% against v1c), and its
+turn min-bets get 9% folds (7%).
 
 ### The fallback
 
@@ -809,7 +823,9 @@ depth against the 66.0 h estimated (100bb 36.4 h, 70bb 17.3 h, 50bb 8.1 h,
 20% (while regrets are discounted), then climbed once negative-regret
 pruning started, from 144k to 271k/s at the end. Against v1c it is ahead
 head to head at every depth (clearly only at 70bb), and its table is 30%
-less exploitable ("Head to head", "Exploitability").
+less exploitable ("Head to head", "Exploitability"). With the turn solved
+live, as served, LBR wins 17 ± 37 bb/100 against it and 39 ± 36 against
+v1c, a difference within the noise.
 
 ## Saved runs
 
