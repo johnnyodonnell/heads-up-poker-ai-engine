@@ -34,9 +34,10 @@ fi
 mkdir -p "$HU_HOME/data" "$HU_HOME/strategies" "$HU_HOME/runs"
 for a in "abstraction-$ABS" "strategy-$RUN"; do
   log "downloading and unpacking $a"
-  gh release download "$TAG" --repo "$REPO" -D "$DL" --clobber -p "$a.tar.zst"
-  zstd -q -d -c "$DL/$a.tar.zst" | tar -xf - -C "$HU_HOME"
-  rm -f "$DL/$a.tar.zst"
+  # One file, or .partNN pieces when it was over GitHub's asset limit.
+  gh release download "$TAG" --repo "$REPO" -D "$DL" --clobber -p "$a.tar.zst*"
+  cat "$DL/$a.tar.zst"* | zstd -q -d -c | tar -xf - -C "$HU_HOME"
+  rm -f "$DL/$a.tar.zst"*
 done
 
 if [ $CKPTS = 1 ]; then

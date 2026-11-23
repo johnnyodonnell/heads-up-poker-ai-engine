@@ -775,6 +775,9 @@ its files.
 | `SHA256SUMS` | | | checksums of every original file |
 | `release.env` | | | the run and abstraction names, for the restore script |
 
+An archive over GitHub's 2 GiB asset limit goes up as `NAME.tar.zst.partNN`
+pieces (v1d's strategy, for one), which the restore script joins.
+
 The abstraction must be saved with the strategy: the strategy is indexed by
 its hand groups, and rebuilding it (multithreaded k-means) isn't guaranteed to
 come out identical. The strategy itself could be re-exported from the
@@ -821,7 +824,9 @@ cfr/box.sh tail -f '$HU_HOME/logs/release-v1d.log'
 The abstraction and strategy go up first, then the checkpoints one depth at a
 time, compressed and split under GitHub's 2 GiB asset limit (the box
 uploads at roughly 4 MB/s, so v1c's checkpoints take about an hour). Pass
-`--no-checkpoints` to skip them. Add the release to the table above.
+`--no-checkpoints` to skip them: serving needs only the abstraction and the
+strategy, and the checkpoints stay on the box (v1d's would be ~45 GB to
+upload, so its release has none). Add the release to the table above.
 
 ## Parity with the TS game
 
